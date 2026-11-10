@@ -810,6 +810,22 @@ local function moveToTarget(rawTargetCFrame)
     end
 end
 
+local function setCharacterCollision(canCollide)
+    local char = LocalPlayer.Character
+    if not char then return end
+    for _, obj in ipairs(char:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            if canCollide then
+                if obj.Name == "HumanoidRootPart" or obj.Name == "Head" or obj.Name == "Torso" or obj.Name == "UpperTorso" or obj.Name == "LowerTorso" then
+                    obj.CanCollide = true
+                end
+            else
+                obj.CanCollide = false
+            end
+        end
+    end
+end
+
 -- Bộ điều khiển bay tuyến tính theo từng khung hình (Heartbeat Linear Stepper)
 local function stepPureFlight(dt)
     if not isAnyAutomationActive() then return end
@@ -821,10 +837,28 @@ local function stepPureFlight(dt)
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not root or not hum or hum.Health <= 0 then return end
 
-    -- Bật NoClip & Xóa hiệu ứng choáng (No-Stun)
+    -- QUAN TRỌNG 1: Nếu đang trong nhịp tương tác NPC dịch chuyển vào Trial Temple -> Gỡ ngay BodyVelocity & thoát sớm TRƯỚC khi tạo lại AntiFall!
+    if State.TeleportingToTempleUntil and os.clock() < State.TeleportingToTempleUntil then
+        removeAntiFall()
+        return
+    end
+
+    -- QUAN TRỌNG 2: Nếu nhân vật vừa được dịch chuyển vào trong Trial Temple (Y >= 12000) mà mục tiêu cũ vẫn ở ngoài đảo (Y < 10000) -> Xóa mục tiêu cũ ngay!
+    if root.Position.Y >= 12000 and State.MoveTargetPos and State.MoveTargetPos.Y < 10000 then
+        State.MoveTargetPos = nil
+        return
+    end
+
+    -- Xử lý NoClip (Xuyên tường) hoặc Tắt Xuyên Tường (khi bay đến Cửa Trial Tộc V4: State.DisableNoClip == true)
     for _, obj in ipairs(char:GetDescendants()) do
-        if obj:IsA("BasePart") and obj.CanCollide then
-            obj.CanCollide = false
+        if obj:IsA("BasePart") then
+            if State.DisableNoClip then
+                if obj.Name == "HumanoidRootPart" or obj.Name == "Head" or obj.Name == "Torso" or obj.Name == "UpperTorso" or obj.Name == "LowerTorso" then
+                    obj.CanCollide = true
+                end
+            elseif obj.CanCollide then
+                obj.CanCollide = false
+            end
         elseif Config.NoStun and (obj.ClassName == "BodyGyro" or obj.ClassName == "BodyPosition") then
             pcall(function() obj:Destroy() end)
         end
@@ -834,31 +868,24 @@ local function stepPureFlight(dt)
         hum.PlatformStand = false
     end
 
-    -- Giữ nhân vật lơ lửng không bị trọng lực kéo rơi giữa các khung hình
-    local holdTarget = head or root
-    if holdTarget then
-        local bv = holdTarget:FindFirstChild("StarHubV4AntiFall")
-        if not bv then
-            bv = Instance.new("BodyVelocity")
-            bv.Name = "StarHubV4AntiFall"
-            bv.P = 1500
-            bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
-            bv.Velocity = Vector3.zero
-            bv.Parent = holdTarget
-        else
-            bv.Velocity = Vector3.zero
+    -- Chỉ giữ BodyVelocity chống rơi khi đang thực sự bay (State.MoveTargetPos ~= nil) hoặc đang treo V4 trên không / đánh quái
+    if State.MoveTargetPos or State.PosMon or State.IsHoveringV4Sky then
+        local holdTarget = head or root
+        if holdTarget then
+            local bv = holdTarget:FindFirstChild("StarHubV4AntiFall")
+            if not bv then
+                bv = Instance.new("BodyVelocity")
+                bv.Name = "StarHubV4AntiFall"
+                bv.P = 1500
+                bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+                bv.Velocity = Vector3.zero
+                bv.Parent = holdTarget
+            else
+                bv.Velocity = Vector3.zero
+            end
         end
-    end
-
-    -- Nếu đang trong nhịp tương tác NPC dịch chuyển vào Trial Temple -> Tạm ngưng giữ CFrame để Server dịch chuyển nhân vật không bị ghi đè!
-    if State.TeleportingToTempleUntil and os.clock() < State.TeleportingToTempleUntil then
-        return
-    end
-
-    -- Nếu nhân vật vừa được dịch chuyển vào trong Trial Temple (Y >= 12000) mà mục tiêu cũ vẫn ở ngoài đảo (Y < 10000) -> Xóa mục tiêu cũ ngay!
-    if root.Position.Y >= 12000 and State.MoveTargetPos and State.MoveTargetPos.Y < 10000 then
-        State.MoveTargetPos = nil
-        return
+    else
+        removeAntiFall()
     end
 
     -- Di chuyển đều từng bước (Speed * dt) thẳng tới State.MoveTargetPos (0 dịch chuyển tức thời!)
@@ -1896,6 +1923,8 @@ end
 
 local function executeFastAttack()
     if State.IsHoveringV4Sky then return end
+    if State.ActiveMainMode == "TrialV4" or State.ActiveMainMode == "BuyGear" then return end
+    if (Config.AutoTrialRaceV4 or Config.AutoFlyBuyGear) and not State.PosMon then return end
     local char = LocalPlayer.Character
     local root, hum = getCharacterRoot()
     local enemies = workspace:FindFirstChild("Enemies")
@@ -3212,7 +3241,7 @@ local function getObjectCFrame(obj)
     return nil
 end
 
--- Hàm kích hoạt nút bấm UI đa tầng (hỗ trợ getconnections, firesignal, GuiService.SelectedObject + Enter & VirtualUser)
+-- Hàm kích hoạt nút bấm UI hộp thoại (TUYỆT ĐỐI KHÔNG gửi phím E hay phím bàn phím để tránh bật nhầm Haki Quan Sát!)
 local function triggerGuiButton(btn)
     if not btn then return end
     pcall(function()
@@ -3234,28 +3263,17 @@ local function triggerGuiButton(btn)
         if btn.MouseButton1Click and type(btn.MouseButton1Click.Fire) == "function" then
             pcall(function() btn.MouseButton1Click:Fire() end)
         end
-        local vim = safeGetService("VirtualInputManager")
-        if GuiService and vim then
-            pcall(function()
-                GuiService.SelectedObject = btn
-                vim:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
-                task.wait(0.02)
-                vim:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
-                GuiService.SelectedObject = nil
-            end)
-        end
     end)
 end
 
--- Hàm tương tác NPC đa tầng (5 lớp):
--- 1. Đưa nhân vật áp sát NPC (<= 3 studs) & ngưng giữ CFrame để không khóa dịch chuyển.
--- 2. Kích hoạt mọi ProximityPrompt, ClickDetector, TouchTransmitter trên NPC & vùng lân cận (<= 30 studs).
--- 3. Hướng Camera vào NPC + Click chuột (VirtualUser) + nhấn phím E (VirtualInputManager) để mở bảng hội thoại Dialogue.
--- 4. Tự động bấm nút Option1 ("Use it" / "Dùng nó" / "Talk") trên bảng PlayerGui.Main.Dialogue.
+-- Hàm tương tác NPC chuẩn Blox Fruits (TUYỆT ĐỐI KHÔNG nhấn phím E vì phím E trong Blox Fruits là bật Haki Quan Sát!):
+-- 1. Đưa nhân vật áp sát NPC (<= 3 studs).
+-- 2. Kích hoạt ProximityPrompt, ClickDetector, TouchTransmitter trên NPC & vùng lân cận (<= 30 studs).
+-- 3. Tự động bấm nút Option1 ("Use it" / "Dùng nó" / "Talk") trên bảng PlayerGui.Main.Dialogue nếu mở lên.
 local function interactWithNpcOrObject(obj, targetCF)
     pcall(function()
         local root = getCharacterRoot()
-        if root and targetCF and (root.Position - targetCF.Position).Magnitude <= 18 and (root.Position - targetCF.Position).Magnitude > 3.5 then
+        if root and targetCF and (root.Position - targetCF.Position).Magnitude <= 18 and (root.Position - targetCF.Position).Magnitude > 3.0 then
             root.CFrame = CFrame.new(targetCF.Position.X, targetCF.Position.Y, targetCF.Position.Z)
         end
 
@@ -3279,7 +3297,7 @@ local function interactWithNpcOrObject(obj, targetCF)
 
         triggerPromptsAndDetectors(obj)
 
-        -- Quét thêm mọi NPC trong workspace.NPCs nằm trong bán kính 30 studs quanh nhân vật để không sót bất kỳ ClickDetector/ProximityPrompt nào
+        -- Quét thêm mọi NPC trong workspace.NPCs nằm trong bán kính 30 studs quanh nhân vật
         local npcsFolder = workspace:FindFirstChild("NPCs")
         if npcsFolder and root then
             for _, nearNpc in ipairs(npcsFolder:GetChildren()) do
@@ -3288,28 +3306,6 @@ local function interactWithNpcOrObject(obj, targetCF)
                     triggerPromptsAndDetectors(nearNpc)
                 end
             end
-        end
-
-        -- Hướng Camera nhìn thẳng vào NPC và giả lập Click chuột + phím E để mở hộp thoại NPC
-        local cam = workspace.CurrentCamera
-        if cam and targetCF then
-            pcall(function()
-                cam.CFrame = CFrame.new(targetCF.Position.X, targetCF.Position.Y + 2, targetCF.Position.Z + 5)
-            end)
-        end
-        if VirtualUser then
-            pcall(function()
-                VirtualUser:CaptureController()
-                VirtualUser:ClickButton1(Vector2.new(400, 300))
-            end)
-        end
-        local vim = safeGetService("VirtualInputManager")
-        if vim then
-            pcall(function()
-                vim:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-                task.wait(0.02)
-                vim:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-            end)
         end
 
         -- Tự động nhấn Option1 trên hộp thoại PlayerGui.Main.Dialogue nếu hộp thoại NPC mở lên
@@ -3326,7 +3322,6 @@ local function interactWithNpcOrObject(obj, targetCF)
 end
 
 -- Hàm tìm tọa độ thực tế của NPC trên đỉnh Đảo Great Tree ("Misc." / "Mysterious Force") để vào Trial Temple
--- Lưu ý: Trong Blox Fruits, NPC vô hình trên đỉnh Great Tree có tên là "Misc." hoặc "Mysterious Force" ở độ cao Y ~ 2195..2300 (< 10000).
 local function findGreatTreeNpcTarget()
     local foundCF, foundObj = nil, nil
     pcall(function()
@@ -3368,7 +3363,7 @@ local function findGreatTreeNpcTarget()
     return foundCF or GreatTreeTopNpcCFrame, foundObj
 end
 
--- Hàm tìm tọa độ thực tế của NPC Mua Gear (Ancient One / Red Orb) bên trong Trial Temple (KHÔNG tìm đồng hồ Ancient Clock)
+-- Hàm tìm tọa độ thực tế của NPC Mua Gear (Ancient One / Red Orb) bên trong Trial Temple
 local function findGearNpcTarget()
     local gearNpcCF, gearNpcObj = AncientOneCFrame, nil
 
@@ -3414,7 +3409,7 @@ end
 -- Quy trình chuẩn 2 bước để vào Trial Temple (Temple of Time) từ bên ngoài:
 -- Bước 1: Bay lên đỉnh Đảo Great Tree tới chỗ NPC ("Misc." / "Mysterious Force").
 -- Bước 2: Khi đã tới sát NPC trên đỉnh Great Tree (<= 15 studs), NGƯNG GIỮ CFRAME BAY (stopTween + removeAntiFall)
---         để không khóa dịch chuyển của Server, tương tác đa tầng với NPC & gọi vào Trial Temple!
+--         và gọi đúng bộ Remote chuẩn của NPC Great Tree: CommF_:InvokeServer("RaceV4Progress", "Teleport") + requestEntrance!
 local function ensureInsideTempleOfTime()
     local root = getCharacterRoot()
     if not root then return false end
@@ -3425,14 +3420,17 @@ local function ensureInsideTempleOfTime()
         return true
     end
 
+    -- Khi còn đang bay ở ngoài đảo lên đỉnh Great Tree, bật NoClip để không vướng tán cây
+    State.DisableNoClip = false
+
     local treeNpcCF, treeNpcObj = findGreatTreeNpcTarget()
     local distToTreeNpc = (root.Position - treeNpcCF.Position).Magnitude
 
-    -- BƯỚC 1: Bay mượt lên đỉnh Đảo Great Tree tới chỗ NPC (chưa tới gần <= 15 studs thì tiếp tục bay, KHÔNG gọi requestEntrance sớm)
+    -- BƯỚC 1: Bay mượt lên đỉnh Đảo Great Tree tới chỗ NPC (chưa tới gần <= 15 studs thì tiếp tục bay, KHÔNG gọi dịch chuyển sớm)
     if distToTreeNpc > 15 then
         if updateStatusUI then
             updateStatusUI(
-                string.format("🌳 [Bước 1/3] Đang bay lên NPC Đảo Great Tree (%dm)...", math.floor(distToTreeNpc)),
+                string.format("🌳 [Bước 1] Đang bay lên NPC Đảo Great Tree (%dm)...", math.floor(distToTreeNpc)),
                 Color3.fromRGB(160, 225, 255)
             )
         end
@@ -3441,32 +3439,27 @@ local function ensureInsideTempleOfTime()
     end
 
     -- BƯỚC 2: Đã tới sát NPC trên đỉnh Đảo Great Tree (<= 15 studs)
-    -- QUAN TRỌNG: Dừng ngay bộ giữ CFrame (stopTween + removeAntiFall + TeleportingToTempleUntil)
-    -- để khi tương tác NPC / gọi requestEntrance, Server dịch chuyển nhân vật lên Trial Temple (Y=14895) KHÔNG BỊ KÉO NGƯỢC VỀ ĐỈNH CÂY!
+    -- Dừng giữ CFrame bay & gọi trực tiếp chuỗi Remote "RaceV4Progress" -> "Teleport" chuẩn của NPC Misc. trên đỉnh Great Tree!
     if updateStatusUI then
         updateStatusUI(
-            "🌀 [Bước 2/3] Đang tương tác NPC Đảo Great Tree để vào Trial Temple...",
+            "🌀 [Bước 2] Đã tới NPC Đảo Great Tree -> Đang tương tác NPC vào Trial Temple...",
             Color3.fromRGB(255, 220, 95)
         )
     end
 
     stopTween()
     removeAntiFall()
-    State.TeleportingToTempleUntil = os.clock() + 0.85
+    State.TeleportingToTempleUntil = os.clock() + 0.90
 
     interactWithNpcOrObject(treeNpcObj, treeNpcCF)
 
     if (os.clock() - (State.LastTempleEntranceClock or 0)) >= 0.45 then
         State.LastTempleEntranceClock = os.clock()
-        pcall(function()
-            CommF_:InvokeServer("requestEntrance", TempleOfTimeEntranceVec)
-        end)
-        pcall(function()
-            CommF_:InvokeServer("MysteriousForce", "1")
-        end)
-        pcall(function()
-            CommF_:InvokeServer("MysteriousForce")
-        end)
+        pcall(function() CommF_:InvokeServer("RaceV4Progress", "Check") end)
+        pcall(function() CommF_:InvokeServer("RaceV4Progress", "Begin") end)
+        pcall(function() CommF_:InvokeServer("RaceV4Progress", "Teleport") end)
+        pcall(function() CommF_:InvokeServer("RaceV4Progress", "Continue") end)
+        pcall(function() CommF_:InvokeServer("requestEntrance", TempleOfTimeEntranceVec) end)
         task.wait(0.2)
     end
 
@@ -3478,8 +3471,9 @@ local function ensureInsideTempleOfTime()
     return false
 end
 
--- 1. Hàm Tự Động Bay Tới Chỗ NPC Mua Gear (Theo đúng yêu cầu:
---    Bước 1: Bay lên NPC Đảo Great Tree -> Bước 2: Tương tác NPC vào Trial Temple -> Bước 3: Chỉ bay tới chỗ NPC Mua Gear (Ancient One), BỎ đoạn bay lên đồng hồ!)
+-- 1. Hàm Tự Động Bay Tới Chỗ NPC Mua Gear:
+--    Bước 1: Bay lên NPC Đảo Great Tree -> Bước 2: Tương tác NPC ("RaceV4Progress", "Teleport") vào Trial Temple
+--    -> Bước 3: Chỉ bay tới chỗ NPC Mua Gear (Ancient One) & gọi UpgradeRace("Check"/"Buy"), KHÔNG bật Haki Quan Sát, KHÔNG bay lên đồng hồ!
 local function executeFlyBuyGearStep()
     if updateDashboardUI then pcall(updateDashboardUI) end
     if CurrentSea ~= 3 then
@@ -3498,17 +3492,17 @@ local function executeFlyBuyGearStep()
         return
     end
 
-    -- Bước 3: Đã ở trong Trial Temple (Y >= 12000) -> CHỈ bay tới chỗ NPC Mua Gear (Ancient One), KHÔNG bay lên Đồng Hồ (Ancient Clock)!
+    -- Bước 3: Đã ở trong Trial Temple (Y >= 12000) -> CHỈ bay tới chỗ NPC Mua Gear (Ancient One)
     root = getCharacterRoot()
     if not root then return end
 
     local gearNpcCF, gearNpcObj = findGearNpcTarget()
     local distToGearNpc = (root.Position - gearNpcCF.Position).Magnitude
 
-    if distToGearNpc > 15 then
+    if distToGearNpc > 12 then
         if updateStatusUI then
             updateStatusUI(
-                string.format("⚙️ [Bước 3/3] Đã vào Trial Temple -> Đang bay tới chỗ NPC Mua Gear (Ancient One - %dm)...", math.floor(distToGearNpc)),
+                string.format("⚙️ [Bước 3] Đã vào Trial Temple -> Đang bay tới chỗ NPC Mua Gear (Ancient One - %dm)...", math.floor(distToGearNpc)),
                 Color3.fromRGB(255, 215, 95)
             )
         end
@@ -3516,26 +3510,31 @@ local function executeFlyBuyGearStep()
         return
     end
 
-    -- Đã tới sát NPC Mua Gear (Ancient One <= 15 studs) -> Đứng tại chỗ NPC Mua Gear, tương tác NPC & gọi UpgradeRace("Buy")
+    -- Đã tới sát NPC Mua Gear (Ancient One <= 12 studs) -> Dừng bay, tắt NoClip, tương tác NPC & gọi UpgradeRace("Check" / "Buy")
     stopTween()
+    removeAntiFall()
+    State.DisableNoClip = true
+    setCharacterCollision(true)
     interactWithNpcOrObject(gearNpcObj, gearNpcCF)
 
-    if (os.clock() - (State.LastUpgradeRaceClock or 0)) >= 1.5 then
+    if (os.clock() - (State.LastUpgradeRaceClock or 0)) >= 1.2 then
         State.LastUpgradeRaceClock = os.clock()
-        pcall(function()
-            CommF_:InvokeServer("UpgradeRace", "Buy")
-        end)
+        pcall(function() CommF_:InvokeServer("UpgradeRace", "Check") end)
+        pcall(function() CommF_:InvokeServer("UpgradeRace", "Buy") end)
     end
 
     if updateStatusUI then
         updateStatusUI(
-            "⚙️ [Hoàn Tất] Đã tới chỗ NPC Mua Gear (Ancient One) & Tự động tương tác Mua Gear!",
+            "⚙️ [Hoàn Tất] Đã tới chỗ NPC Mua Gear (Ancient One) & Đang tương tác Mua Gear!",
             Color3.fromRGB(115, 255, 165)
         )
     end
 end
 
--- 2. Hàm Tự Động Hoàn Thành Trial Tộc V4 (Hỗ trợ đầy đủ cả 6 Tộc: Mink, Angel/Skypiea, Cyborg, Human, Ghoul, Fishman/Shark)
+-- 2. Hàm Tự Động Bay Đến Cổng Trial Tộc V4 (Theo đúng yêu cầu:
+--    - TUYỆT ĐỐI KHÔNG đi đánh quái dù ở ngoài đảo hay trong đền!
+--    - Khi chưa ở trong Trial Temple: Bay lên NPC ở Đảo Great Tree -> Tương tác NPC để vào Trial Temple.
+--    - Khi đã vào Trial Temple: TẮT KHẢ NĂNG XUYÊN TƯỜNG (State.DisableNoClip = true, CanCollide = true) và chỉ bay đến đúng Cửa Up Tộc V4 của bạn!)
 local function executeAutoTrialRaceV4Step()
     if updateDashboardUI then pcall(updateDashboardUI) end
     if CurrentSea ~= 3 then
@@ -3546,157 +3545,47 @@ local function executeAutoTrialRaceV4Step()
     local root, hum = getCharacterRoot()
     if not root or not hum then return end
 
-    local raceName = getPlayerRaceName()
-    local map = workspace:FindFirstChild("Map")
+    -- Tuyệt đối KHÔNG khóa quái hay bay đi đánh quái!
+    State.LockedMob = nil
+    State.PosMon = nil
 
-    -- KIỂM TRA 1: TỘC MINK (Thỏ - Trial of Speed / Mê Cung) -> Bay thẳng tới vạch đích MinkTrial.Ceiling!
-    local minkCeiling = nil
-    pcall(function()
-        local minkTrial = (map and map:FindFirstChild("MinkTrial")) or workspace:FindFirstChild("MinkTrial")
-        if minkTrial then
-            minkCeiling = minkTrial:FindFirstChild("Ceiling") or minkTrial:FindFirstChild("FinishPart", true)
-        end
-    end)
-    if minkCeiling and minkCeiling:IsA("BasePart") and (raceName == "Mink" or (root.Position - minkCeiling.Position).Magnitude <= 1500) then
-        State.LockedMob = nil
-        State.PosMon = nil
-        if updateStatusUI then
-            updateStatusUI("🏆 [Trial Mink] Đang bay thẳng tới vạch đích Mê Cung (Ceiling)!", Color3.fromRGB(120, 255, 165))
-        end
-        moveToTarget(minkCeiling.CFrame)
-        if (root.Position - minkCeiling.Position).Magnitude <= 25 then
-            pcall(function()
-                if firetouchinterest then
-                    firetouchinterest(root, minkCeiling, 0)
-                    firetouchinterest(root, minkCeiling, 1)
-                end
-            end)
-        end
-        return
-    end
-
-    -- KIỂM TRA 2: TỘC ANGEL / SKYPIEA (Thiên Thần - Trial of the King / Nhảy Mây) -> Bay thẳng tới SkyTrial.Model.FinishPart!
-    local skyFinish = nil
-    pcall(function()
-        local skyTrial = (map and map:FindFirstChild("SkyTrial")) or workspace:FindFirstChild("SkyTrial")
-        if skyTrial then
-            local model = skyTrial:FindFirstChild("Model")
-            skyFinish = (model and model:FindFirstChild("FinishPart")) or skyTrial:FindFirstChild("FinishPart", true)
-        end
-    end)
-    if skyFinish and skyFinish:IsA("BasePart") and (raceName == "Skypiea" or raceName == "Angel" or (root.Position - skyFinish.Position).Magnitude <= 1500) then
-        State.LockedMob = nil
-        State.PosMon = nil
-        if updateStatusUI then
-            updateStatusUI("🏆 [Trial Angel/Skypiea] Đang bay thẳng tới Đích Nhảy Mây (FinishPart)!", Color3.fromRGB(120, 255, 165))
-        end
-        moveToTarget(skyFinish.CFrame)
-        if (root.Position - skyFinish.Position).Magnitude <= 25 then
-            pcall(function()
-                if firetouchinterest then
-                    firetouchinterest(root, skyFinish, 0)
-                    firetouchinterest(root, skyFinish, 1)
-                end
-            end)
-        end
-        return
-    end
-
-    -- KIỂM TRA 3: TỘC FISHMAN / SHARK (Người Cá - Trial of Water / Đánh Sea Beast)
-    local seaBeastsFolder = workspace:FindFirstChild("SeaBeasts")
-    if seaBeastsFolder then
-        for _, sb in ipairs(seaBeastsFolder:GetChildren()) do
-            local sbRoot = sb:FindFirstChild("HumanoidRootPart") or sb:FindFirstChild("RootPart")
-            local sbHum = sb:FindFirstChildOfClass("Humanoid")
-            local sbAlive = sbRoot and ((not sbHum) or sbHum.Health > 0)
-            if sbAlive and (root.Position - sbRoot.Position).Magnitude <= 2000 then
-                enableBusoHaki()
-                executeRaceAbilities()
-                equipWeapon(Config.SelectWeapon)
-                local targetCF = toFlatCFrame(sbRoot.CFrame, 25)
-                State.PosMon = toFlatCFrame(sbRoot.CFrame, 0)
-                if updateStatusUI then
-                    updateStatusUI("🏆 [Trial Shark/Fishman] Đang tiêu diệt Sea Beast trong ải!", Color3.fromRGB(115, 230, 255))
-                end
-                moveToTarget(targetCF)
-                if Config.FastAttack then
-                    pcall(executeFastAttack)
-                end
-                pcall(function()
-                    local tool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
-                    if tool then tool:Activate() end
-                end)
-                return
-            end
-        end
-    end
-
-    -- KIỂM TRA 4: TỘC HUMAN (Trial of Strength) & TỘC GHOUL (Trial of Carnage) -> Tiêu diệt toàn bộ quái / Boss trong ải Trial!
-    local enemies = workspace:FindFirstChild("Enemies")
-    if enemies then
-        local trialMobs = {}
-        local nearestMob, nearestRoot, nearestDist = nil, nil, math.huge
-        for _, mob in ipairs(enemies:GetChildren()) do
-            local alive, mRoot = isMobAlive(mob)
-            if alive and mRoot then
-                local d = (mRoot.Position - root.Position).Magnitude
-                -- Quái trong phòng Trial ở độ cao Y > 10000 hoặc trong bán kính 800 studs quanh nhân vật
-                if mRoot.Position.Y > 10000 or d <= 800 then
-                    table.insert(trialMobs, mob.Name)
-                    if d < nearestDist then
-                        nearestDist = d
-                        nearestMob = mob
-                        nearestRoot = mRoot
-                    end
-                end
-            end
-        end
-        if nearestMob and nearestRoot then
-            engageMobGroup(
-                trialMobs,
-                nearestRoot.CFrame,
-                Config.SelectWeapon,
-                string.format("🏆 [Trial %s] Đang tiêu diệt quái/Boss ải Trial", raceName),
-                false
-            )
-            return
-        end
-    end
-
-    -- KIỂM TRA 5: TỘC CYBORG (Người Máy - Trial of the Machine / Né Tên Lửa)
-    -- Nếu là tộc Cyborg và đang ở trong khu vực độ cao Temple of Time (Y > 12000), bay vọt lên cao (Y = 15150) để né 100% bom/tên lửa!
-    local cyborgTrialModel = map and (map:FindFirstChild("CyborgTrial") or workspace:FindFirstChild("CyborgTrial"))
-    if raceName == "Cyborg" and (cyborgTrialModel ~= nil or root.Position.Y > 14950) then
-        State.LockedMob = nil
-        State.PosMon = nil
-        local safeCyborgSky = CFrame.new(28502, 15150, -423)
-        if updateStatusUI then
-            updateStatusUI("🏆 [Trial Cyborg] Đang bay treo trên không (Y=15150) né 100% tên lửa!", Color3.fromRGB(130, 255, 195))
-        end
-        moveToTarget(safeCyborgSky)
-        return
-    end
-
-    -- KIỂM TRA 6: Khi đang chờ mở cửa Trial trong hành lang Temple of Time -> Tự bay tới đúng Cửa Tộc của bạn & kích hoạt Tộc V3!
+    -- Bước 1 & Bước 2: Nếu chưa ở trong Trial Temple -> Bay lên NPC ở Đảo Great Tree & tương tác NPC để vào Trial Temple!
     if not ensureInsideTempleOfTime() then
         return
     end
 
+    -- Bước 3: Đã ở trong Trial Temple (Y >= 12000) -> TẮT KHẢ NĂNG XUYÊN TƯỜNG (DisableNoClip = true, CanCollide = true) khi bay đến Cửa Up Tộc!
+    State.DisableNoClip = true
+    setCharacterCollision(true)
+
+    root = getCharacterRoot()
+    if not root then return end
+
+    local raceName = getPlayerRaceName()
     local doorCF = RaceTrialDoorCFrames[raceName] or RaceTrialDoorCFrames["Human"]
     local distToDoor = (root.Position - doorCF.Position).Magnitude
-    moveToTarget(doorCF)
-    if distToDoor <= 20 then
-        pcall(function()
-            local commE = Remotes:FindFirstChild("CommE") or (ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("CommE"))
-            if commE then commE:FireServer("ActivateAbility") end
-        end)
+
+    if distToDoor > 12 then
         if updateStatusUI then
-            updateStatusUI(string.format("🚪 Đang đứng tại Cửa Trial [%s] & Tự bật Tộc V3 mở cửa!", raceName), Color3.fromRGB(255, 220, 90))
+            updateStatusUI(
+                string.format("🚪 [Đã Tắt Xuyên Tường] Đang bay tới Cổng Trial Tộc [%s] (%dm)...", raceName, math.floor(distToDoor)),
+                Color3.fromRGB(165, 225, 255)
+            )
         end
-    else
-        if updateStatusUI then
-            updateStatusUI(string.format("🚪 Đang bay tới Cửa Trial [%s] (%dm)...", raceName, math.floor(distToDoor)), Color3.fromRGB(165, 225, 255))
-        end
+        moveToTarget(doorCF)
+        return
+    end
+
+    -- Đã tới Cổng Trial Tộc V4 (<= 12 studs) -> Đứng im tại cửa với va chạm vật lý (CanCollide = true), không xuyên tường!
+    stopTween()
+    removeAntiFall()
+    setCharacterCollision(true)
+
+    if updateStatusUI then
+        updateStatusUI(
+            string.format("🚪 [Hoàn Tất] Đã đứng tại Cổng Trial Tộc [%s] (Đã tắt xuyên tường)!", raceName),
+            Color3.fromRGB(115, 255, 165)
+        )
     end
 end
 
@@ -3729,6 +3618,9 @@ task.spawn(function()
 
             if not Config.AutoTrainRaceV4 then
                 State.IsHoveringV4Sky = false
+            end
+            if not Config.AutoTrialRaceV4 and not Config.AutoFlyBuyGear then
+                State.DisableNoClip = false
             end
 
             -- Ưu tiên đúng chức năng người dùng vừa bật gần nhất (ActiveMainMode), không bị kẹt bởi toggle cũ
@@ -4563,7 +4455,7 @@ createToggleRow("⚙️ Auto Bay Tới Chỗ NPC Mua Gear V4 (Qua NPC Đảo Gre
     end
 end)
 
-createToggleRow("🏆 Auto Hoàn Thành Trial Tộc V4 (Đủ 6 Tộc: Mink/Angel/Cyborg/Human/Ghoul/Shark)", Config.AutoTrialRaceV4, 4, function(v)
+createToggleRow("🚪 Auto Bay Đến Cổng Trial Tộc V4 (Qua NPC Great Tree - Tắt Xuyên Tường)", Config.AutoTrialRaceV4, 4, function(v)
     Config.AutoTrialRaceV4 = v
     State.LastMobSeenClock = os.clock()
     if v then
