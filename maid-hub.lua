@@ -4620,22 +4620,32 @@ Util.spawnTracked("MainDispatcher", function()
     end
 end)
 
+
 local function mountSafeScreenGui(gui)
+    local target = nil
     if gethui then
-        local ok = pcall(function()
-            local hui = gethui()
-            if hui then
-                gui.Parent = hui
+        local ok, hui = pcall(gethui)
+        if ok and hui then
+            pcall(function() gui.Parent = hui end)
+            if gui.Parent == hui then
+                return hui
             end
+        end
+    end
+
+    if syn and syn.protect_gui then
+        pcall(function()
+            syn.protect_gui(gui)
+            gui.Parent = CoreGui
+            target = CoreGui
         end)
-        if ok and gui.Parent then
-            return gui.Parent
+        if gui.Parent == CoreGui then
+            return CoreGui
         end
     end
 
     if CoreGui then
         local ok = pcall(function()
-            local _ = CoreGui.Name
             gui.Parent = CoreGui
         end)
         if ok and gui.Parent == CoreGui then
@@ -4712,333 +4722,480 @@ end
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "MaidHub_V5_AllInOne"
 ScreenGui.ResetOnSpawn = false
+ScreenGui.DisplayOrder = 9999
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function() ScreenGui.IgnoreGuiInset = true end)
 mountSafeScreenGui(ScreenGui)
+
+table.insert(State.Connections, LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    if ScreenGui and (not ScreenGui.Parent or not ScreenGui.Parent.Parent) then
+        mountSafeScreenGui(ScreenGui)
+    end
+end))
 
 do
 local maidAvatarAsset = loadMaidCircularAvatarAsset()
 
-local FloatBtn = Instance.new("TextButton")
-FloatBtn.Name = "MaidHubToggleButton"
-FloatBtn.Size = UDim2.new(0, 56, 0, 56)
-FloatBtn.Position = UDim2.new(0, 18, 0.44, 0)
-FloatBtn.BackgroundColor3 = Color3.fromRGB(22, 20, 38)
-FloatBtn.Text = (maidAvatarAsset ~= "" and "") or "🍵"
-FloatBtn.TextColor3 = Color3.fromRGB(165, 220, 255)
-FloatBtn.TextSize = 22
-FloatBtn.Font = Enum.Font.GothamBold
-FloatBtn.ClipsDescendants = true
-FloatBtn.Parent = ScreenGui
-local FloatCorner = Instance.new("UICorner", FloatBtn)
-FloatCorner.CornerRadius = UDim.new(1, 0)
-local FloatStroke = Instance.new("UIStroke", FloatBtn)
-FloatStroke.Color = Color3.fromRGB(135, 195, 255)
-FloatStroke.Thickness = 2.2
+local Theme = {
+    Bg        = Color3.fromRGB(15, 13, 27),
+    Sidebar   = Color3.fromRGB(22, 19, 38),
+    SidebarHi = Color3.fromRGB(42, 35, 70),
+    Card      = Color3.fromRGB(26, 22, 44),
+    CardDark  = Color3.fromRGB(19, 16, 33),
+    Topbar    = Color3.fromRGB(25, 21, 42),
+    Accent    = Color3.fromRGB(135, 185, 255),
+    Green     = Color3.fromRGB(90, 225, 145),
+    Red       = Color3.fromRGB(255, 110, 130),
+    Yellow    = Color3.fromRGB(255, 215, 95),
+    Text      = Color3.fromRGB(240, 240, 255),
+    Dim       = Color3.fromRGB(145, 140, 180),
+    Muted     = Color3.fromRGB(95, 90, 125),
+    Stroke    = Color3.fromRGB(55, 48, 92),
+    TogOn     = Color3.fromRGB(80, 210, 140),
+    TogOff    = Color3.fromRGB(50, 44, 78),
+    Divider   = Color3.fromRGB(40, 35, 65)
+}
 
-local FloatAvatar = Instance.new("ImageLabel")
-FloatAvatar.Name = "MaidAvatarCircle"
-FloatAvatar.Size = UDim2.new(1, 0, 1, 0)
-FloatAvatar.Position = UDim2.new(0, 0, 0, 0)
-FloatAvatar.BackgroundTransparency = 1
-FloatAvatar.Image = maidAvatarAsset
-FloatAvatar.Parent = FloatBtn
-local FloatAvatarCorner = Instance.new("UICorner", FloatAvatar)
-FloatAvatarCorner.CornerRadius = UDim.new(1, 0)
+-- Helpers
+local function addCorner(parent, radius)
+    local corner = Instance.new("UICorner", parent)
+    corner.CornerRadius = UDim.new(0, radius or 8)
+    return corner
+end
 
+local function addStroke(parent, color, thickness)
+    local stroke = Instance.new("UIStroke", parent)
+    stroke.Color = color or Theme.Stroke
+    stroke.Thickness = thickness or 1
+    return stroke
+end
+
+local function addPadding(parent, top, bottom, left, right)
+    local pad = Instance.new("UIPadding", parent)
+    pad.PaddingTop = UDim.new(0, top or 0)
+    pad.PaddingBottom = UDim.new(0, bottom or 0)
+    pad.PaddingLeft = UDim.new(0, left or 0)
+    pad.PaddingRight = UDim.new(0, right or 0)
+    return pad
+end
+
+local function addListLayout(parent, gap)
+    local layout = Instance.new("UIListLayout", parent)
+    layout.Padding = UDim.new(0, gap or 6)
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    return layout
+end
+
+local function createSectionHeader(parent, title, order)
+    local headerFrame = Instance.new("Frame")
+    headerFrame.Size = UDim2.new(1, 0, 0, 20)
+    headerFrame.BackgroundTransparency = 1
+    headerFrame.LayoutOrder = order or 0
+    headerFrame.Parent = parent
+
+    local headerLabel = Instance.new("TextLabel", headerFrame)
+    headerLabel.Size = UDim2.new(1, 0, 1, 0)
+    headerLabel.BackgroundTransparency = 1
+    headerLabel.Text = title
+    headerLabel.TextColor3 = Theme.Accent
+    headerLabel.Font = Enum.Font.GothamBold
+    headerLabel.TextSize = 11
+    headerLabel.TextXAlignment = Enum.TextXAlignment.Left
+    return headerFrame
+end
+
+local function createToggleRow(parent, title, defaultValue, order, callback)
+    local button = Instance.new("TextButton")
+    button.Size = UDim2.new(1, 0, 0, 36)
+    button.BackgroundColor3 = Theme.Card
+    button.LayoutOrder = order or 0
+    button.Text = ""
+    button.AutoButtonColor = false
+    button.Parent = parent
+    addCorner(button, 8)
+    local stroke = addStroke(button, defaultValue and Theme.Green or Theme.Stroke, 1)
+
+    local label = Instance.new("TextLabel", button)
+    label.Size = UDim2.new(1, -68, 1, 0)
+    label.Position = UDim2.new(0, 12, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = title
+    label.TextColor3 = Theme.Text
+    label.Font = Enum.Font.GothamMedium
+    label.TextSize = 11
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextTruncate = Enum.TextTruncate.AtEnd
+
+    local pill = Instance.new("Frame", button)
+    pill.Size = UDim2.new(0, 42, 0, 22)
+    pill.Position = UDim2.new(1, -52, 0.5, -11)
+    pill.BackgroundColor3 = defaultValue and Theme.TogOn or Theme.TogOff
+    addCorner(pill, 11)
+
+    local knob = Instance.new("Frame", pill)
+    knob.Size = UDim2.new(0, 16, 0, 16)
+    knob.Position = defaultValue and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+    knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    addCorner(knob, 8)
+
+    local currentValue = defaultValue
+
+    local function setVisual(val)
+        pill.BackgroundColor3 = val and Theme.TogOn or Theme.TogOff
+        stroke.Color = val and Theme.Green or Theme.Stroke
+        pcall(function()
+            TweenService:Create(knob, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                Position = val and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8)
+            }):Play()
+        end)
+    end
+
+    button.MouseButton1Click:Connect(function()
+        currentValue = not currentValue
+        setVisual(currentValue)
+        callback(currentValue)
+        saveConfig()
+    end)
+
+    return button, function() return currentValue end, function(newVal)
+        currentValue = newVal
+        setVisual(currentValue)
+    end
+end
+
+local function createActionRow(parent, title, buttonText, buttonColor, order, callback)
+    local row = Instance.new("Frame")
+    row.Size = UDim2.new(1, 0, 0, 36)
+    row.BackgroundColor3 = Theme.Card
+    row.LayoutOrder = order or 0
+    row.Parent = parent
+    addCorner(row, 8)
+    addStroke(row, Theme.Stroke, 1)
+
+    local label = Instance.new("TextLabel", row)
+    label.Size = UDim2.new(1, -110, 1, 0)
+    label.Position = UDim2.new(0, 12, 0, 0)
+    label.BackgroundTransparency = 1
+    label.Text = title
+    label.TextColor3 = Theme.Text
+    label.Font = Enum.Font.GothamMedium
+    label.TextSize = 11
+    label.TextXAlignment = Enum.TextXAlignment.Left
+    label.TextTruncate = Enum.TextTruncate.AtEnd
+
+    local btn = Instance.new("TextButton", row)
+    btn.Size = UDim2.new(0, 96, 0, 26)
+    btn.Position = UDim2.new(1, -104, 0.5, -13)
+    btn.BackgroundColor3 = buttonColor or Color3.fromRGB(55, 46, 88)
+    btn.Text = buttonText or "Thực Hiện"
+    btn.TextColor3 = Theme.Text
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 11
+    addCorner(btn, 6)
+
+    btn.MouseButton1Click:Connect(function()
+        callback()
+    end)
+    return row
+end
+
+local function createPage(parent, isVisible)
+    local page = Instance.new("ScrollingFrame")
+    page.Size = UDim2.new(1, 0, 1, 0)
+    page.BackgroundTransparency = 1
+    page.BorderSizePixel = 0
+    page.ScrollBarThickness = 5
+    page.ScrollBarImageColor3 = Theme.Accent
+    page.CanvasSize = UDim2.new(0, 0, 0, 900)
+    page.Visible = (isVisible == true)
+    page.Parent = parent
+
+    local layout = addListLayout(page, 6)
+    addPadding(page, 6, 10, 6, 6)
+
+    if layout.GetPropertyChangedSignal then
+        table.insert(State.Connections, layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            page.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 20)
+        end))
+    end
+    return page
+end
+
+-- Main Window
 local MainFrame = Instance.new("Frame")
-MainFrame.Size = UDim2.new(0, 465, 0, 435)
-MainFrame.Position = UDim2.new(0.5, -232, 0.5, -217)
-MainFrame.BackgroundColor3 = Color3.fromRGB(15, 13, 25)
+MainFrame.Name = "MaidHubMainWindow"
+MainFrame.Size = UDim2.new(0, 520, 0, 395)
+MainFrame.Position = UDim2.new(0.5, -260, 0.5, -197)
+MainFrame.BackgroundColor3 = Theme.Bg
 MainFrame.BorderSizePixel = 0
+MainFrame.ClipsDescendants = true
 MainFrame.Parent = ScreenGui
-Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
-local MainStroke = Instance.new("UIStroke", MainFrame)
-MainStroke.Color = Color3.fromRGB(135, 185, 255)
-MainStroke.Thickness = 1.8
+addCorner(MainFrame, 12)
+addStroke(MainFrame, Theme.Accent, 1.8)
 
+-- TopBar
 local TopBar = Instance.new("Frame")
-TopBar.Size = UDim2.new(1, 0, 0, 40)
-TopBar.BackgroundColor3 = Color3.fromRGB(26, 22, 46)
+TopBar.Name = "TopBar"
+TopBar.Size = UDim2.new(1, 0, 0, 38)
+TopBar.BackgroundColor3 = Theme.Topbar
 TopBar.BorderSizePixel = 0
 TopBar.Parent = MainFrame
-Instance.new("UICorner", TopBar).CornerRadius = UDim.new(0, 12)
+addCorner(TopBar, 12)
+
+local TopBarPatch = Instance.new("Frame")
+TopBarPatch.Size = UDim2.new(1, 0, 0, 14)
+TopBarPatch.Position = UDim2.new(0, 0, 1, -14)
+TopBarPatch.BackgroundColor3 = Theme.Topbar
+TopBarPatch.BorderSizePixel = 0
+TopBarPatch.Parent = TopBar
+
+local TopAvatar = Instance.new("ImageLabel")
+TopAvatar.Size = UDim2.new(0, 26, 0, 26)
+TopAvatar.Position = UDim2.new(0, 8, 0, 6)
+TopAvatar.BackgroundColor3 = Theme.Bg
+TopAvatar.Image = maidAvatarAsset
+TopAvatar.ClipsDescendants = true
+TopAvatar.Active = false
+TopAvatar.Parent = TopBar
+addCorner(TopAvatar, 13)
+addStroke(TopAvatar, Theme.Accent, 1.2)
 
 local TitleLabel = Instance.new("TextLabel")
-TitleLabel.Size = UDim2.new(1, -160, 1, 0)
-TitleLabel.Position = UDim2.new(0, 44, 0, 0)
+TitleLabel.Size = UDim2.new(1, -90, 1, 0)
+TitleLabel.Position = UDim2.new(0, 40, 0, 0)
 TitleLabel.BackgroundTransparency = 1
-TitleLabel.Text = "🌸 MAID HUB V5.8  |  AUTO SAVE & SMOOTH FLY"
-TitleLabel.TextColor3 = Color3.fromRGB(175, 225, 255)
+TitleLabel.Text = "🌸 MAID HUB V5.8  |  RAZEN ENGINE"
+TitleLabel.TextColor3 = Theme.Accent
 TitleLabel.Font = Enum.Font.GothamBold
 TitleLabel.TextSize = 13
 TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
 TitleLabel.Parent = TopBar
 
-local ScrollUpBtn = Instance.new("TextButton")
-ScrollUpBtn.Size = UDim2.new(0, 28, 0, 26)
-ScrollUpBtn.Position = UDim2.new(1, -104, 0, 7)
-ScrollUpBtn.BackgroundColor3 = Color3.fromRGB(45, 38, 72)
-ScrollUpBtn.Text = "▲"
-ScrollUpBtn.TextColor3 = Color3.fromRGB(180, 225, 255)
-ScrollUpBtn.Font = Enum.Font.GothamBold
-ScrollUpBtn.TextSize = 12
-ScrollUpBtn.Parent = TopBar
-Instance.new("UICorner", ScrollUpBtn).CornerRadius = UDim.new(0, 6)
-
-local ScrollDownBtn = Instance.new("TextButton")
-ScrollDownBtn.Size = UDim2.new(0, 28, 0, 26)
-ScrollDownBtn.Position = UDim2.new(1, -70, 0, 7)
-ScrollDownBtn.BackgroundColor3 = Color3.fromRGB(45, 38, 72)
-ScrollDownBtn.Text = "▼"
-ScrollDownBtn.TextColor3 = Color3.fromRGB(180, 225, 255)
-ScrollDownBtn.Font = Enum.Font.GothamBold
-ScrollDownBtn.TextSize = 12
-ScrollDownBtn.Parent = TopBar
-Instance.new("UICorner", ScrollDownBtn).CornerRadius = UDim.new(0, 6)
-
 local MinBtn = Instance.new("TextButton")
 MinBtn.Size = UDim2.new(0, 28, 0, 26)
-MinBtn.Position = UDim2.new(1, -36, 0, 7)
-MinBtn.BackgroundColor3 = Color3.fromRGB(45, 38, 72)
+MinBtn.Position = UDim2.new(1, -36, 0, 6)
+MinBtn.BackgroundColor3 = Color3.fromRGB(48, 40, 78)
 MinBtn.Text = "—"
-MinBtn.TextColor3 = Color3.fromRGB(230, 230, 255)
+MinBtn.TextColor3 = Theme.Text
 MinBtn.Font = Enum.Font.GothamBold
 MinBtn.TextSize = 14
 MinBtn.Parent = TopBar
-Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(0, 6)
+addCorner(MinBtn, 6)
 
-local TopAvatar = Instance.new("ImageLabel")
-TopAvatar.Name = "TopMaidAvatarCircle"
-TopAvatar.Size = UDim2.new(0, 30, 0, 30)
-TopAvatar.Position = UDim2.new(0, 8, 0, 5)
-TopAvatar.BackgroundColor3 = Color3.fromRGB(22, 20, 38)
-TopAvatar.Image = maidAvatarAsset
-TopAvatar.ClipsDescendants = true
-TopAvatar.Parent = TopBar
-local TopAvatarCorner = Instance.new("UICorner", TopAvatar)
-TopAvatarCorner.CornerRadius = UDim.new(1, 0)
-local TopAvatarStroke = Instance.new("UIStroke", TopAvatar)
-TopAvatarStroke.Color = Color3.fromRGB(135, 195, 255)
-TopAvatarStroke.Thickness = 1.5
+-- Sidebar
+local SideBar = Instance.new("Frame")
+SideBar.Name = "SideBar"
+SideBar.Size = UDim2.new(0, 105, 1, -38)
+SideBar.Position = UDim2.new(0, 0, 0, 38)
+SideBar.BackgroundColor3 = Theme.Sidebar
+SideBar.BorderSizePixel = 0
+SideBar.Parent = MainFrame
 
-local function makeDraggable(handle, frame)
-    local dragging, dragStart, startPos = false, nil, nil
-    table.insert(State.Connections, handle.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = input.Position
-            startPos = frame.Position
-        end
-    end))
-    table.insert(State.Connections, UserInputService.InputChanged:Connect(function(input)
-        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            local delta = input.Position - dragStart
-            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
-        end
-    end))
-    table.insert(State.Connections, UserInputService.InputEnded:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
-        end
-    end))
+local SideDivider = Instance.new("Frame")
+SideDivider.Size = UDim2.new(0, 1, 1, 0)
+SideDivider.Position = UDim2.new(1, 0, 0, 0)
+SideDivider.BackgroundColor3 = Theme.Divider
+SideDivider.BorderSizePixel = 0
+SideDivider.Parent = SideBar
+
+local SideScroll = Instance.new("ScrollingFrame")
+SideScroll.Size = UDim2.new(1, 0, 1, 0)
+SideScroll.BackgroundTransparency = 1
+SideScroll.BorderSizePixel = 0
+SideScroll.ScrollBarThickness = 2
+SideScroll.ScrollBarImageColor3 = Theme.Accent
+SideScroll.CanvasSize = UDim2.new(0, 0, 0, 340)
+SideScroll.Parent = SideBar
+addListLayout(SideScroll, 3)
+addPadding(SideScroll, 6, 6, 4, 4)
+
+-- Content Area
+local ContentArea = Instance.new("Frame")
+ContentArea.Name = "ContentArea"
+ContentArea.Size = UDim2.new(1, -106, 1, -38)
+ContentArea.Position = UDim2.new(0, 106, 0, 38)
+ContentArea.BackgroundTransparency = 1
+ContentArea.BorderSizePixel = 0
+ContentArea.Parent = MainFrame
+
+-- Tab Definitions
+local tabDefs = {
+    { key = "Home",      icon = "🏠", label = "Home" },
+    { key = "Farming",   icon = "🌾", label = "Farming" },
+    { key = "Gacha",     icon = "🎯", label = "Gacha" },
+    { key = "Store",     icon = "🛒", label = "Store" },
+    { key = "Teleports", icon = "📍", label = "Teleports" },
+    { key = "Misc",      icon = "⚙️", label = "Misc" },
+    { key = "Settings",  icon = "🔧", label = "Settings" },
+    { key = "About",     icon = "ℹ️", label = "About" }
+}
+
+local pages = {}
+local tabButtons = {}
+local tabLabels = {}
+local switchTab
+
+for _, tab in ipairs(tabDefs) do
+    pages[tab.key] = createPage(ContentArea, tab.key == "Home")
 end
 
-makeDraggable(TopBar, MainFrame)
-makeDraggable(FloatBtn, FloatBtn)
+for idx, tab in ipairs(tabDefs) do
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, 0, 0, 34)
+    btn.BackgroundColor3 = (tab.key == "Home") and Theme.SidebarHi or Theme.Sidebar
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.LayoutOrder = idx
+    btn.Parent = SideScroll
+    addCorner(btn, 6)
 
-local DashCard = Instance.new("Frame")
-DashCard.Size = UDim2.new(1, -24, 0, 72)
-DashCard.Position = UDim2.new(0, 12, 0, 46)
-DashCard.BackgroundColor3 = Color3.fromRGB(23, 19, 38)
-DashCard.BorderSizePixel = 0
-DashCard.Parent = MainFrame
-Instance.new("UICorner", DashCard).CornerRadius = UDim.new(0, 8)
+    local ind = Instance.new("Frame", btn)
+    ind.Name = "ActiveIndicator"
+    ind.Size = UDim2.new(0, 3, 0.6, 0)
+    ind.Position = UDim2.new(0, 0, 0.2, 0)
+    ind.BackgroundColor3 = Theme.Accent
+    ind.BorderSizePixel = 0
+    ind.Visible = (tab.key == "Home")
+    addCorner(ind, 2)
+
+    local iconLabel = Instance.new("TextLabel", btn)
+    iconLabel.Size = UDim2.new(0, 22, 1, 0)
+    iconLabel.Position = UDim2.new(0, 6, 0, 0)
+    iconLabel.BackgroundTransparency = 1
+    iconLabel.Text = tab.icon
+    iconLabel.TextSize = 13
+    iconLabel.Font = Enum.Font.GothamBold
+    iconLabel.TextColor3 = Theme.Text
+
+    local textLabel = Instance.new("TextLabel", btn)
+    textLabel.Size = UDim2.new(1, -32, 1, 0)
+    textLabel.Position = UDim2.new(0, 30, 0, 0)
+    textLabel.BackgroundTransparency = 1
+    textLabel.Text = tab.label
+    textLabel.TextColor3 = (tab.key == "Home") and Theme.Text or Theme.Dim
+    textLabel.Font = Enum.Font.GothamMedium
+    textLabel.TextSize = 11
+    textLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+    tabButtons[tab.key] = btn
+    tabLabels[tab.key] = textLabel
+
+    btn.MouseButton1Click:Connect(function()
+        switchTab(tab.key)
+    end)
+end
+
+switchTab = function(activeKey)
+    for k, page in pairs(pages) do
+        page.Visible = (k == activeKey)
+    end
+    for k, btn in pairs(tabButtons) do
+        btn.BackgroundColor3 = (k == activeKey) and Theme.SidebarHi or Theme.Sidebar
+        local ind = btn:FindFirstChild("ActiveIndicator")
+        if ind then ind.Visible = (k == activeKey) end
+        if tabLabels[k] then
+            tabLabels[k].TextColor3 = (k == activeKey) and Theme.Text or Theme.Dim
+        end
+    end
+end
+
+-- =========================================================================
+-- TAB 1: HOME (Branding, Hub Status, Quick Toggle, Thống kê nguyên liệu)
+-- =========================================================================
+local homePage = pages["Home"]
+
+-- Hub Status Card
+local StatusCard = Instance.new("Frame")
+StatusCard.Size = UDim2.new(1, 0, 0, 78)
+StatusCard.BackgroundColor3 = Theme.Card
+StatusCard.LayoutOrder = 1
+StatusCard.Parent = homePage
+addCorner(StatusCard, 8)
+addStroke(StatusCard, Theme.Stroke, 1)
 
 local MatLine = Instance.new("TextLabel")
 MatLine.Size = UDim2.new(1, -16, 0, 20)
 MatLine.Position = UDim2.new(0, 8, 0, 4)
 MatLine.BackgroundTransparency = 1
-MatLine.Text = "🐟 Fish Tail: 0/20 | 🌋 Magma Ore: 0/20 | 💧 Droplet: 0/10 | 🐉 Scale: 0/10"
-MatLine.TextColor3 = Color3.fromRGB(190, 230, 255)
+MatLine.Text = "🐟 Fish Tail: 0/20 | 🌋 Magma: 0/20 | 💧 Droplet: 0/10 | 🐉 Scale: 0/10"
+MatLine.TextColor3 = Color3.fromRGB(185, 230, 255)
 MatLine.Font = Enum.Font.GothamBold
-MatLine.TextSize = 11
+MatLine.TextSize = 10
 MatLine.TextXAlignment = Enum.TextXAlignment.Left
-MatLine.Parent = DashCard
+MatLine.Parent = StatusCard
 
 local PlayerLine = Instance.new("TextLabel")
 PlayerLine.Size = UDim2.new(1, -16, 0, 20)
-PlayerLine.Position = UDim2.new(0, 8, 0, 25)
+PlayerLine.Position = UDim2.new(0, 8, 0, 26)
 PlayerLine.BackgroundTransparency = 1
-PlayerLine.Text = string.format("Sea: %d  |  Tốc bay: %d  |  Vũ khí: %s", CurrentSea, Config.TweenSpeed, Config.SelectWeapon)
-PlayerLine.TextColor3 = Color3.fromRGB(255, 215, 110)
+PlayerLine.Text = string.format("Sea: %d | Tốc bay: %d | Vũ khí: %s", CurrentSea, Config.TweenSpeed, Config.SelectWeapon)
+PlayerLine.TextColor3 = Theme.Yellow
 PlayerLine.Font = Enum.Font.GothamMedium
-PlayerLine.TextSize = 11
+PlayerLine.TextSize = 10
 PlayerLine.TextXAlignment = Enum.TextXAlignment.Left
-PlayerLine.Parent = DashCard
+PlayerLine.Parent = StatusCard
 
 local StatusLabel = Instance.new("TextLabel")
 StatusLabel.Size = UDim2.new(1, -16, 0, 20)
-StatusLabel.Position = UDim2.new(0, 8, 0, 46)
+StatusLabel.Position = UDim2.new(0, 8, 0, 50)
 StatusLabel.BackgroundTransparency = 1
-StatusLabel.Text = "Trạng thái: Đã nạp Config tự động"
-StatusLabel.TextColor3 = Color3.fromRGB(115, 255, 160)
+StatusLabel.Text = "Trạng thái: Đã nạp cấu hình hệ thống"
+StatusLabel.TextColor3 = Theme.Green
 StatusLabel.Font = Enum.Font.GothamSemibold
-StatusLabel.TextSize = 11
+StatusLabel.TextSize = 10
 StatusLabel.TextXAlignment = Enum.TextXAlignment.Left
-StatusLabel.Parent = DashCard
+StatusLabel.Parent = StatusCard
 
 updateStatusUI = function(msg, col)
     StatusLabel.Text = "Trạng thái: " .. tostring(msg)
     StatusLabel.TextColor3 = col or Color3.fromRGB(220, 220, 255)
 end
 
-local updateMaterialSelectorText
-updateDashboardUI = function()
-    local ft = State.InventoryCounts["Fish Tail"] or 0
-    local mo = State.InventoryCounts["Magma Ore"] or 0
-    local md = State.InventoryCounts["Mystic Droplet"] or 0
-    local ds = State.InventoryCounts["Dragon Scale"] or 0
-    local selMat = Config.SelectedMaterial or "Fish Tail"
-    local selCount = State.InventoryCounts[selMat] or 0
-    MatLine.Text = string.format("🐟 Fish Tail: %d/20 | 🌋 Magma: %d/20 | 💧 Droplet: %d/10 | 🐉 Scale: %d/10 | 📦 %s: %d", ft, mo, md, ds, selMat, selCount)
+-- Quick Toggle
+createSectionHeader(homePage, "⚡ QUICK TOGGLE (BẬT / TẮT NHANH)", 2)
 
-    local charTool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
-    local mas = charTool and charTool:FindFirstChild("Level") and charTool.Level.Value or "--"
-    local tName = charTool and charTool.Name or "Chưa cầm"
-    local moon = getMoonPhaseInfo()
-    PlayerLine.Text = string.format("Sea: %d | %s | Bay: %d | Cầm: %s (Mas: %s)", CurrentSea, moon.ShortName, Config.TweenSpeed, tName, tostring(mas))
-    if updateMaterialSelectorText then Util.safeCall("updateMaterialSelectorText", updateMaterialSelectorText) end
-    if updateMoonButtonText then Util.safeCall("updateMoonButtonText", updateMoonButtonText) end
-end
+local QuickGrid = Instance.new("Frame")
+QuickGrid.Size = UDim2.new(1, 0, 0, 80)
+QuickGrid.BackgroundTransparency = 1
+QuickGrid.LayoutOrder = 3
+QuickGrid.Parent = homePage
 
-local Scroll = Instance.new("ScrollingFrame")
-Scroll.Size = UDim2.new(1, -24, 1, -132)
-Scroll.Position = UDim2.new(0, 12, 0, 124)
-Scroll.BackgroundTransparency = 1
-Scroll.BorderSizePixel = 0
-Scroll.ScrollingEnabled = true
-Scroll.Active = true
-Scroll.ScrollBarThickness = 7
-Scroll.ScrollBarImageColor3 = Color3.fromRGB(155, 105, 255)
-Scroll.CanvasSize = UDim2.new(0, 0, 0, 1020)
-Scroll.CanvasPosition = Vector2.new(0, 0)
-Scroll.Parent = MainFrame
+local qUIGrid = Instance.new("UIGridLayout", QuickGrid)
+qUIGrid.CellSize = UDim2.new(0.32, -4, 0, 36)
+qUIGrid.CellPadding = UDim2.new(0.02, 0, 0, 6)
 
-local Layout = Instance.new("UIListLayout")
-Layout.Padding = UDim.new(0, 7)
-Layout.SortOrder = Enum.SortOrder.LayoutOrder
-Layout.Parent = Scroll
+local syncToggles = {}
 
-local function getMaxScrollOffset()
-    local contentY = (Layout.AbsoluteContentSize and Layout.AbsoluteContentSize.Y) or 1020
-    local viewY = (Scroll.AbsoluteSize and Scroll.AbsoluteSize.Y) or 300
-    return math.max(580, contentY - viewY + 20)
-end
+local function createQuickButton(title, isDefaultOn, onClick)
+    local qBtn = Instance.new("TextButton", QuickGrid)
+    qBtn.BackgroundColor3 = isDefaultOn and Theme.TogOn or Theme.Card
+    qBtn.Text = title
+    qBtn.TextColor3 = isDefaultOn and Color3.fromRGB(15, 25, 15) or Theme.Text
+    qBtn.Font = Enum.Font.GothamBold
+    qBtn.TextSize = 10
+    addCorner(qBtn, 6)
+    local qStroke = addStroke(qBtn, isDefaultOn and Theme.Green or Theme.Stroke, 1)
 
-local function refreshScrollCanvasSize()
-    pcall(function()
-        if Layout.AbsoluteContentSize and Layout.AbsoluteContentSize.Y > 0 then
-            Scroll.CanvasSize = UDim2.new(0, 0, 0, Layout.AbsoluteContentSize.Y + 16)
-        end
-    end)
-end
-
-if Layout.GetPropertyChangedSignal then
-    table.insert(State.Connections, Layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(refreshScrollCanvasSize))
-end
-
-local swipeActive = false
-local swipeStartY = 0
-local swipeStartCanvasY = 0
-
-local function attachSwipeHandler(guiObj)
-    table.insert(State.Connections, guiObj.InputBegan:Connect(function(input)
-        if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-            swipeActive = true
-            swipeStartY = input.Position.Y
-            swipeStartCanvasY = (Scroll.CanvasPosition and Scroll.CanvasPosition.Y) or 0
-        end
-    end))
-end
-
-attachSwipeHandler(Scroll)
-
-table.insert(State.Connections, UserInputService.InputChanged:Connect(function(input)
-    if swipeActive and (input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
-        local deltaY = swipeStartY - input.Position.Y
-        if math.abs(deltaY) > 6 then
-            refreshScrollCanvasSize()
-            local newY = math.max(0, math.min(getMaxScrollOffset(), swipeStartCanvasY + deltaY))
-            Scroll.CanvasPosition = Vector2.new(0, newY)
-        end
-    end
-end))
-
-table.insert(State.Connections, UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then
-        swipeActive = false
-    end
-end))
-
-local function scrollByOffset(deltaY)
-    refreshScrollCanvasSize()
-    local curY = (Scroll.CanvasPosition and Scroll.CanvasPosition.Y) or 0
-    local nextY = math.max(0, math.min(getMaxScrollOffset(), curY + deltaY))
-    Scroll.CanvasPosition = Vector2.new(0, nextY)
-end
-
-ScrollUpBtn.MouseButton1Click:Connect(function() scrollByOffset(-90) end)
-ScrollDownBtn.MouseButton1Click:Connect(function() scrollByOffset(90) end)
-
-local function createToggleRow(title, defaultVal, order, callback)
-    local Btn = Instance.new("TextButton")
-    Btn.LayoutOrder = order
-    Btn.Size = UDim2.new(1, -10, 0, 36)
-    Btn.BackgroundColor3 = Color3.fromRGB(28, 24, 48)
-    Btn.Text = ""
-    Btn.Parent = Scroll
-    Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 8)
-    attachSwipeHandler(Btn)
-
-    local Stroke = Instance.new("UIStroke", Btn)
-    Stroke.Color = defaultVal and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(85, 70, 145)
-    Stroke.Thickness = 1.2
-
-    local Tbl = Instance.new("TextLabel")
-    Tbl.Size = UDim2.new(0.73, 0, 1, 0)
-    Tbl.Position = UDim2.new(0, 12, 0, 0)
-    Tbl.BackgroundTransparency = 1
-    Tbl.Text = title
-    Tbl.TextColor3 = Color3.fromRGB(245, 245, 255)
-    Tbl.Font = Enum.Font.GothamBold
-    Tbl.TextSize = 12
-    Tbl.TextXAlignment = Enum.TextXAlignment.Left
-    Tbl.Parent = Btn
-
-    local Badge = Instance.new("TextLabel")
-    Badge.Size = UDim2.new(0.24, -12, 1, 0)
-    Badge.Position = UDim2.new(0.76, 0, 0, 0)
-    Badge.BackgroundTransparency = 1
-    Badge.Text = defaultVal and "ĐANG BẬT" or "ĐANG TẮT"
-    Badge.TextColor3 = defaultVal and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(255, 115, 130)
-    Badge.Font = Enum.Font.GothamBold
-    Badge.TextSize = 11
-    Badge.TextXAlignment = Enum.TextXAlignment.Right
-    Badge.Parent = Btn
-
-    local val = defaultVal
-    Btn.MouseButton1Click:Connect(function()
-        val = not val
-        Badge.Text = val and "ĐANG BẬT" or "ĐANG TẮT"
-        Badge.TextColor3 = val and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(255, 115, 130)
-        Stroke.Color = val and Color3.fromRGB(100, 255, 150) or Color3.fromRGB(85, 70, 145)
-        callback(val)
+    local stateVal = isDefaultOn
+    qBtn.MouseButton1Click:Connect(function()
+        stateVal = not stateVal
+        qBtn.BackgroundColor3 = stateVal and Theme.TogOn or Theme.Card
+        qBtn.TextColor3 = stateVal and Color3.fromRGB(15, 25, 15) or Theme.Text
+        qStroke.Color = stateVal and Theme.Green or Theme.Stroke
+        onClick(stateVal)
         saveConfig()
     end)
-    return Btn
+    return function(newVal)
+        stateVal = newVal
+        qBtn.BackgroundColor3 = stateVal and Theme.TogOn or Theme.Card
+        qBtn.TextColor3 = stateVal and Color3.fromRGB(15, 25, 15) or Theme.Text
+        qStroke.Color = stateVal and Theme.Green or Theme.Stroke
+    end
 end
 
-createToggleRow("🔥 Auto Farm Level (Sea 1 / Sea 2 / Sea 3)", Config.AutoFarmLevel, 1, function(v)
+-- 6 Quick Toggles
+local updateQuickFarmLevel = createQuickButton("🌾 Farm Level", Config.AutoFarmLevel, function(v)
     Config.AutoFarmLevel = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5047,32 +5204,16 @@ createToggleRow("🔥 Auto Farm Level (Sea 1 / Sea 2 / Sea 3)", Config.AutoFarmL
         State.IsHopping = false
         State.LockedMob = nil
         State.PosMon = nil
-        updateStatusUI("Bắt đầu Auto Farm Level...", Color3.fromRGB(110, 255, 155))
+        updateStatusUI("Bắt đầu Auto Farm Level...", Theme.Green)
     elseif not isAnyAutomationActive() then
         stopTween()
         removeAntiFall()
-        updateStatusUI("Đã tạm dừng Auto Farm Level", Color3.fromRGB(255, 180, 100))
+        updateStatusUI("Đã tạm dừng Farm Level", Theme.Yellow)
     end
+    if syncToggles.FarmLevel then syncToggles.FarmLevel(v) end
 end)
 
-createToggleRow("👑 Auto Get Godhuman (Full 9 Võ + Mastery + Nguyên Liệu)", Config.AutoGodhuman, 2, function(v)
-    Config.AutoGodhuman = v
-    State.LastMobSeenClock = os.clock()
-    if v then
-        State.ActiveMainMode = "Godhuman"
-        Config.ActiveMainMode = "Godhuman"
-        State.IsHopping = false
-        State.LockedMob = nil
-        State.PosMon = nil
-        updateStatusUI("Bắt đầu chu trình Auto Godhuman...", Color3.fromRGB(255, 220, 85))
-    elseif not isAnyAutomationActive() then
-        stopTween()
-        removeAntiFall()
-        updateStatusUI("Đã tạm dừng Auto Godhuman", Color3.fromRGB(255, 180, 100))
-    end
-end)
-
-createToggleRow("🧪 Auto Farm Nguyên Liệu Đang Chọn", Config.AutoMaterial, 3, function(v)
+local updateQuickMaterial = createQuickButton("🧪 Farm NL", Config.AutoMaterial, function(v)
     Config.AutoMaterial = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5083,110 +5224,285 @@ createToggleRow("🧪 Auto Farm Nguyên Liệu Đang Chọn", Config.AutoMateria
         State.PosMon = nil
         State.SpawnPointIndex = 1
         State.ArrivedAtSpawnClock = nil
-        updateStatusUI("Bắt đầu Farm nguyên liệu: " .. tostring(Config.SelectedMaterial), Color3.fromRGB(130, 215, 255))
+        updateStatusUI("Farm nguyên liệu: " .. tostring(Config.SelectedMaterial), Theme.Accent)
     elseif not isAnyAutomationActive() then
         stopTween()
         removeAntiFall()
-        updateStatusUI("Đã tạm dừng Farm nguyên liệu", Color3.fromRGB(255, 180, 100))
+        updateStatusUI("Đã dừng Farm nguyên liệu", Theme.Yellow)
     end
+    if syncToggles.Material then syncToggles.Material(v) end
 end)
 
+local updateQuickGodhuman = createQuickButton("👑 Godhuman", Config.AutoGodhuman, function(v)
+    Config.AutoGodhuman = v
+    State.LastMobSeenClock = os.clock()
+    if v then
+        State.ActiveMainMode = "Godhuman"
+        Config.ActiveMainMode = "Godhuman"
+        State.IsHopping = false
+        State.LockedMob = nil
+        State.PosMon = nil
+        updateStatusUI("Chu trình Auto Godhuman...", Theme.Yellow)
+    elseif not isAnyAutomationActive() then
+        stopTween()
+        removeAntiFall()
+        updateStatusUI("Đã dừng Auto Godhuman", Theme.Yellow)
+    end
+    if syncToggles.Godhuman then syncToggles.Godhuman(v) end
+end)
+
+local updateQuickKata = createQuickButton("🍰 Farm Kata", Config.AutoFarmKata, function(v)
+    Config.AutoFarmKata = v
+    State.LastMobSeenClock = os.clock()
+    if v then
+        State.ActiveMainMode = "Kata"
+        Config.ActiveMainMode = "Kata"
+        State.IsHopping = false
+        State.LockedMob = nil
+        State.PosMon = nil
+        State.SpawnPointIndex = 1
+        State.ArrivedAtSpawnClock = nil
+        updateStatusUI("Farm Quái Đảo Bánh & Kata...", Theme.Yellow)
+    elseif not isAnyAutomationActive() then
+        stopTween()
+        removeAntiFall()
+        updateStatusUI("Đã dừng Farm Kata", Theme.Yellow)
+    end
+    if syncToggles.Kata then syncToggles.Kata(v) end
+end)
+
+local updateQuickLeviathan = createQuickButton("🐉 Leviathan", Config.AutoFindLeviathan, function(v)
+    Config.AutoFindLeviathan = v
+    State.LastMobSeenClock = os.clock()
+    if v then
+        State.ActiveMainMode = "FindLeviathan"
+        Config.ActiveMainMode = "FindLeviathan"
+        State.IsHopping = false
+        State.LockedMob = nil
+        State.PosMon = nil
+        updateStatusUI("Auto Tìm Đảo Leviathan...", Theme.Accent)
+    elseif not isAnyAutomationActive() then
+        stopTween()
+        removeAntiFall()
+        updateStatusUI("Đã dừng Tìm Leviathan", Theme.Yellow)
+    end
+    if syncToggles.Leviathan then syncToggles.Leviathan(v) end
+end)
+
+local updateQuickFastAttack = createQuickButton("⚡ Fast Attack", Config.FastAttack, function(v)
+    Config.FastAttack = v
+    if syncToggles.FastAttack then syncToggles.FastAttack(v) end
+end)
+
+-- Material Inventory Detail
+createSectionHeader(homePage, "📦 KHO NGUYÊN LIỆU CHI TIẾT", 4)
+
+local MatBox = Instance.new("TextLabel")
+MatBox.Size = UDim2.new(1, 0, 0, 70)
+MatBox.BackgroundColor3 = Theme.CardDark
+MatBox.LayoutOrder = 5
+MatBox.TextColor3 = Theme.Text
+MatBox.Font = Enum.Font.GothamMedium
+MatBox.TextSize = 10
+MatBox.TextXAlignment = Enum.TextXAlignment.Left
+MatBox.TextYAlignment = Enum.TextYAlignment.Top
+MatBox.TextWrapped = true
+MatBox.Parent = homePage
+addCorner(MatBox, 8)
+addPadding(MatBox, 8, 8, 10, 10)
+
+local function refreshMatBox()
+    local list = {}
+    for mName, count in pairs(State.InventoryCounts) do
+        if count > 0 then
+            table.insert(list, string.format("%s: %d", mName, count))
+        end
+    end
+    if #list == 0 then
+        MatBox.Text = "Chưa có nguyên liệu nào trong túi đồ (hoặc chưa quét xong Inventory)."
+        MatBox.TextColor3 = Theme.Muted
+    else
+        table.sort(list)
+        MatBox.Text = table.concat(list, "  •  ")
+        MatBox.TextColor3 = Theme.Text
+    end
+end
+
+local updateMaterialSelectorText
+
+updateDashboardUI = function()
+    local ft = State.InventoryCounts["Fish Tail"] or 0
+    local mo = State.InventoryCounts["Magma Ore"] or 0
+    local md = State.InventoryCounts["Mystic Droplet"] or 0
+    local ds = State.InventoryCounts["Dragon Scale"] or 0
+    local selMat = Config.SelectedMaterial or "Fish Tail"
+    local selCount = State.InventoryCounts[selMat] or 0
+    MatLine.Text = string.format("🐟 %d/20 | 🌋 %d/20 | 💧 %d/10 | 🐉 %d/10 | 📦 %s: %d", ft, mo, md, ds, selMat, selCount)
+
+    local charTool = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Tool")
+    local mas = charTool and charTool:FindFirstChild("Level") and charTool.Level.Value or "--"
+    local tName = charTool and charTool.Name or "Chưa cầm"
+    local moon = getMoonPhaseInfo()
+    PlayerLine.Text = string.format("Sea: %d | %s | Bay: %d | %s (Mas: %s)", CurrentSea, moon.ShortName, Config.TweenSpeed, tName, tostring(mas))
+
+    if updateMaterialSelectorText then Util.safeCall("updateMaterialSelectorText", updateMaterialSelectorText) end
+    if updateMoonButtonText then Util.safeCall("updateMoonButtonText", updateMoonButtonText) end
+    pcall(refreshMatBox)
+end
+
+-- =========================================================================
+-- TAB 2: FARMING (Cày Level, Vũ khí, Bay, Farm Nguyên liệu, Kata, Xương)
+-- =========================================================================
+local farmPage = pages["Farming"]
+
+createSectionHeader(farmPage, "🎯 CÀY CẤP & NHIỆM VỤ", 1)
+
+local _, _, setFarmLevel = createToggleRow(farmPage, "🔥 Auto Farm Level (Sea 1 / Sea 2 / Sea 3)", Config.AutoFarmLevel, 2, function(v)
+    Config.AutoFarmLevel = v
+    State.LastMobSeenClock = os.clock()
+    if v then
+        State.ActiveMainMode = "Level"
+        Config.ActiveMainMode = "Level"
+        State.IsHopping = false
+        State.LockedMob = nil
+        State.PosMon = nil
+        updateStatusUI("Bắt đầu Auto Farm Level...", Theme.Green)
+    elseif not isAnyAutomationActive() then
+        stopTween()
+        removeAntiFall()
+        updateStatusUI("Đã tạm dừng Auto Farm Level", Theme.Yellow)
+    end
+    updateQuickFarmLevel(v)
+end)
+syncToggles.FarmLevel = setFarmLevel
+
+createToggleRow(farmPage, "🛡️ Auto Buso Haki (Tự Bật Khi Farm)", Config.AutoBuso, 3, function(v)
+    Config.AutoBuso = v
+end)
+
+local Weapons = { "Melee", "Sword", "Blox Fruit" }
+local WpIdx = 1
+for i, w in ipairs(Weapons) do if w == Config.SelectWeapon then WpIdx = i; break end end
+
+local WpBtn = Instance.new("TextButton")
+WpBtn.LayoutOrder = 4
+WpBtn.Size = UDim2.new(1, 0, 0, 36)
+WpBtn.BackgroundColor3 = Theme.Card
+WpBtn.Text = "🗡️ Vũ Khí Farm: " .. tostring(Config.SelectWeapon) .. "  —  [Nhấn Để Đổi]"
+WpBtn.TextColor3 = Theme.Yellow
+WpBtn.Font = Enum.Font.GothamBold
+WpBtn.TextSize = 11
+WpBtn.Parent = farmPage
+addCorner(WpBtn, 8)
+addStroke(WpBtn, Theme.Stroke, 1)
+
+WpBtn.MouseButton1Click:Connect(function()
+    WpIdx = (WpIdx % #Weapons) + 1
+    Config.SelectWeapon = Weapons[WpIdx]
+    WpBtn.Text = "🗡️ Vũ Khí Farm: " .. Config.SelectWeapon .. "  —  [Nhấn Để Đổi]"
+    updateDashboardUI()
+    saveConfig()
+end)
+
+createSectionHeader(farmPage, "✈️ ĐIỀU CHỈNH TỐC ĐỘ BAY (TWEEN SPEED)", 5)
+
 local SpeedRow = Instance.new("Frame")
-SpeedRow.LayoutOrder = 4
-SpeedRow.Size = UDim2.new(1, -10, 0, 38)
-SpeedRow.BackgroundColor3 = Color3.fromRGB(28, 24, 48)
-SpeedRow.Parent = Scroll
-Instance.new("UICorner", SpeedRow).CornerRadius = UDim.new(0, 8)
-local SpeedStroke = Instance.new("UIStroke", SpeedRow)
-SpeedStroke.Color = Color3.fromRGB(115, 185, 255)
-SpeedStroke.Thickness = 1
+SpeedRow.LayoutOrder = 6
+SpeedRow.Size = UDim2.new(1, 0, 0, 36)
+SpeedRow.BackgroundColor3 = Theme.Card
+SpeedRow.Parent = farmPage
+addCorner(SpeedRow, 8)
+addStroke(SpeedRow, Theme.Accent, 1)
 
-local SpeedMinus10Btn = Instance.new("TextButton")
-SpeedMinus10Btn.Size = UDim2.new(0, 38, 1, -8)
-SpeedMinus10Btn.Position = UDim2.new(0, 5, 0, 4)
-SpeedMinus10Btn.BackgroundColor3 = Color3.fromRGB(44, 36, 76)
-SpeedMinus10Btn.Text = "-10"
-SpeedMinus10Btn.TextColor3 = Color3.fromRGB(255, 175, 110)
-SpeedMinus10Btn.Font = Enum.Font.GothamBold
-SpeedMinus10Btn.TextSize = 11
-SpeedMinus10Btn.Parent = SpeedRow
-Instance.new("UICorner", SpeedMinus10Btn).CornerRadius = UDim.new(0, 6)
+local SM10 = Instance.new("TextButton", SpeedRow)
+SM10.Size = UDim2.new(0, 36, 1, -8)
+SM10.Position = UDim2.new(0, 4, 0, 4)
+SM10.BackgroundColor3 = Color3.fromRGB(45, 36, 78)
+SM10.Text = "-10"
+SM10.TextColor3 = Theme.Yellow
+SM10.Font = Enum.Font.GothamBold
+SM10.TextSize = 10
+addCorner(SM10, 6)
 
-local SpeedMinus1Btn = Instance.new("TextButton")
-SpeedMinus1Btn.Size = UDim2.new(0, 36, 1, -8)
-SpeedMinus1Btn.Position = UDim2.new(0, 47, 0, 4)
-SpeedMinus1Btn.BackgroundColor3 = Color3.fromRGB(54, 44, 92)
-SpeedMinus1Btn.Text = "-1"
-SpeedMinus1Btn.TextColor3 = Color3.fromRGB(255, 210, 120)
-SpeedMinus1Btn.Font = Enum.Font.GothamBold
-SpeedMinus1Btn.TextSize = 12
-SpeedMinus1Btn.Parent = SpeedRow
-Instance.new("UICorner", SpeedMinus1Btn).CornerRadius = UDim.new(0, 6)
+local SM1 = Instance.new("TextButton", SpeedRow)
+SM1.Size = UDim2.new(0, 32, 1, -8)
+SM1.Position = UDim2.new(0, 44, 0, 4)
+SM1.BackgroundColor3 = Color3.fromRGB(52, 42, 88)
+SM1.Text = "-1"
+SM1.TextColor3 = Theme.Yellow
+SM1.Font = Enum.Font.GothamBold
+SM1.TextSize = 10
+addCorner(SM1, 6)
 
-local SpeedTitle = Instance.new("TextLabel")
-SpeedTitle.Size = UDim2.new(1, -176, 1, 0)
-SpeedTitle.Position = UDim2.new(0, 88, 0, 0)
+local SpeedTitle = Instance.new("TextLabel", SpeedRow)
+SpeedTitle.Size = UDim2.new(1, -160, 1, 0)
+SpeedTitle.Position = UDim2.new(0, 80, 0, 0)
 SpeedTitle.BackgroundTransparency = 1
 SpeedTitle.Text = "✈️ Tốc Độ Bay: " .. tostring(Config.TweenSpeed)
 SpeedTitle.TextColor3 = Color3.fromRGB(165, 230, 255)
 SpeedTitle.Font = Enum.Font.GothamBold
 SpeedTitle.TextSize = 12
-SpeedTitle.Parent = SpeedRow
 
-local SpeedPlus1Btn = Instance.new("TextButton")
-SpeedPlus1Btn.Size = UDim2.new(0, 36, 1, -8)
-SpeedPlus1Btn.Position = UDim2.new(1, -83, 0, 4)
-SpeedPlus1Btn.BackgroundColor3 = Color3.fromRGB(54, 44, 92)
-SpeedPlus1Btn.Text = "+1"
-SpeedPlus1Btn.TextColor3 = Color3.fromRGB(120, 255, 165)
-SpeedPlus1Btn.Font = Enum.Font.GothamBold
-SpeedPlus1Btn.TextSize = 12
-SpeedPlus1Btn.Parent = SpeedRow
-Instance.new("UICorner", SpeedPlus1Btn).CornerRadius = UDim.new(0, 6)
+local SP1 = Instance.new("TextButton", SpeedRow)
+SP1.Size = UDim2.new(0, 32, 1, -8)
+SP1.Position = UDim2.new(1, -78, 0, 4)
+SP1.BackgroundColor3 = Color3.fromRGB(52, 42, 88)
+SP1.Text = "+1"
+SP1.TextColor3 = Theme.Green
+SP1.Font = Enum.Font.GothamBold
+SP1.TextSize = 10
+addCorner(SP1, 6)
 
-local SpeedPlus10Btn = Instance.new("TextButton")
-SpeedPlus10Btn.Size = UDim2.new(0, 38, 1, -8)
-SpeedPlus10Btn.Position = UDim2.new(1, -43, 0, 4)
-SpeedPlus10Btn.BackgroundColor3 = Color3.fromRGB(44, 36, 76)
-SpeedPlus10Btn.Text = "+10"
-SpeedPlus10Btn.TextColor3 = Color3.fromRGB(100, 240, 190)
-SpeedPlus10Btn.Font = Enum.Font.GothamBold
-SpeedPlus10Btn.TextSize = 11
-SpeedPlus10Btn.Parent = SpeedRow
-Instance.new("UICorner", SpeedPlus10Btn).CornerRadius = UDim.new(0, 6)
+local SP10 = Instance.new("TextButton", SpeedRow)
+SP10.Size = UDim2.new(0, 36, 1, -8)
+SP10.Position = UDim2.new(1, -42, 0, 4)
+SP10.BackgroundColor3 = Color3.fromRGB(45, 36, 78)
+SP10.Text = "+10"
+SP10.TextColor3 = Theme.Green
+SP10.Font = Enum.Font.GothamBold
+SP10.TextSize = 10
+addCorner(SP10, 6)
 
-local function adjustFlySpeed(delta)
+local function adjSpeed(delta)
     Config.TweenSpeed = math.max(Config.MinTweenSpeed, math.min(Config.MaxTweenSpeed, Config.TweenSpeed + delta))
     SpeedTitle.Text = "✈️ Tốc Độ Bay: " .. tostring(Config.TweenSpeed)
     updateDashboardUI()
     saveConfig()
 end
+SM10.MouseButton1Click:Connect(function() adjSpeed(-10) end)
+SM1.MouseButton1Click:Connect(function() adjSpeed(-1) end)
+SP1.MouseButton1Click:Connect(function() adjSpeed(1) end)
+SP10.MouseButton1Click:Connect(function() adjSpeed(10) end)
 
-SpeedMinus10Btn.MouseButton1Click:Connect(function() adjustFlySpeed(-10) end)
-SpeedMinus1Btn.MouseButton1Click:Connect(function() adjustFlySpeed(-1) end)
-SpeedPlus1Btn.MouseButton1Click:Connect(function() adjustFlySpeed(1) end)
-SpeedPlus10Btn.MouseButton1Click:Connect(function() adjustFlySpeed(10) end)
+createSectionHeader(farmPage, "🧪 FARM NGUYÊN LIỆU (MATERIALS)", 7)
+
+local _, _, setMaterial = createToggleRow(farmPage, "🧪 Auto Farm Nguyên Liệu Đang Chọn", Config.AutoMaterial, 8, function(v)
+    Config.AutoMaterial = v
+    State.LastMobSeenClock = os.clock()
+    if v then
+        State.ActiveMainMode = "Material"
+        Config.ActiveMainMode = "Material"
+        State.IsHopping = false
+        State.LockedMob = nil
+        State.PosMon = nil
+        State.SpawnPointIndex = 1
+        State.ArrivedAtSpawnClock = nil
+        updateStatusUI("Farm nguyên liệu: " .. tostring(Config.SelectedMaterial), Theme.Accent)
+    elseif not isAnyAutomationActive() then
+        stopTween()
+        removeAntiFall()
+        updateStatusUI("Đã tạm dừng Farm nguyên liệu", Theme.Yellow)
+    end
+    updateQuickMaterial(v)
+end)
+syncToggles.Material = setMaterial
 
 local MatNames = {
-    "Fish Tail",
-    "Magma Ore",
-    "Mystic Droplet",
-    "Dragon Scale",
-    "Bones",
-    "Ectoplasm",
-    "Conjured Cocoa",
-    "Demonic Wisp",
-    "Mini Tusk",
-    "Vampire Fang",
-    "Radioactive Material",
-    "Gunpowder",
-    "Scrap Metal",
-    "Leather",
-    "Angel Wings",
-    "Nightmare Catcher",
-    "Mirror Fractal",
-    "Meteorite",
-    "Yeti Fur"
+    "Fish Tail", "Magma Ore", "Mystic Droplet", "Dragon Scale",
+    "Bones", "Ectoplasm", "Conjured Cocoa", "Demonic Wisp",
+    "Mini Tusk", "Vampire Fang", "Radioactive Material", "Gunpowder",
+    "Scrap Metal", "Leather", "Angel Wings", "Nightmare Catcher",
+    "Mirror Fractal", "Meteorite", "Yeti Fur"
 }
 local MatIdx = 1
 for i, m in ipairs(MatNames) do
@@ -5194,49 +5510,52 @@ for i, m in ipairs(MatNames) do
 end
 Config.SelectedMaterial = MatNames[MatIdx]
 
-local MatSelectBtn = Instance.new("TextButton")
-MatSelectBtn.LayoutOrder = 5
-MatSelectBtn.Size = UDim2.new(1, -10, 0, 36)
-MatSelectBtn.BackgroundColor3 = Color3.fromRGB(32, 27, 55)
-MatSelectBtn.Text = ""
-MatSelectBtn.TextColor3 = Color3.fromRGB(160, 225, 255)
-MatSelectBtn.Font = Enum.Font.GothamBold
-MatSelectBtn.TextSize = 11
-MatSelectBtn.Parent = Scroll
-Instance.new("UICorner", MatSelectBtn).CornerRadius = UDim.new(0, 8)
-attachSwipeHandler(MatSelectBtn)
+local MatRow = Instance.new("Frame")
+MatRow.Size = UDim2.new(1, 0, 0, 36)
+MatRow.BackgroundColor3 = Theme.Card
+MatRow.LayoutOrder = 9
+MatRow.Parent = farmPage
+addCorner(MatRow, 8)
+addStroke(MatRow, Theme.Stroke, 1)
 
-local MatPrevBtn = Instance.new("TextButton")
-MatPrevBtn.Size = UDim2.new(0, 32, 1, -8)
-MatPrevBtn.Position = UDim2.new(0, 4, 0, 4)
-MatPrevBtn.BackgroundColor3 = Color3.fromRGB(52, 42, 88)
-MatPrevBtn.Text = "◀"
-MatPrevBtn.TextColor3 = Color3.fromRGB(255, 210, 120)
-MatPrevBtn.Font = Enum.Font.GothamBold
-MatPrevBtn.TextSize = 11
-MatPrevBtn.Parent = MatSelectBtn
-Instance.new("UICorner", MatPrevBtn).CornerRadius = UDim.new(0, 6)
+local MatPrev = Instance.new("TextButton", MatRow)
+MatPrev.Size = UDim2.new(0, 32, 1, -8)
+MatPrev.Position = UDim2.new(0, 4, 0, 4)
+MatPrev.BackgroundColor3 = Color3.fromRGB(50, 42, 85)
+MatPrev.Text = "◀"
+MatPrev.TextColor3 = Theme.Yellow
+MatPrev.Font = Enum.Font.GothamBold
+MatPrev.TextSize = 11
+addCorner(MatPrev, 6)
 
-local MatNextBtn = Instance.new("TextButton")
-MatNextBtn.Size = UDim2.new(0, 32, 1, -8)
-MatNextBtn.Position = UDim2.new(1, -36, 0, 4)
-MatNextBtn.BackgroundColor3 = Color3.fromRGB(52, 42, 88)
-MatNextBtn.Text = "▶"
-MatNextBtn.TextColor3 = Color3.fromRGB(120, 255, 165)
-MatNextBtn.Font = Enum.Font.GothamBold
-MatNextBtn.TextSize = 11
-MatNextBtn.Parent = MatSelectBtn
-Instance.new("UICorner", MatNextBtn).CornerRadius = UDim.new(0, 6)
+local MatNext = Instance.new("TextButton", MatRow)
+MatNext.Size = UDim2.new(0, 32, 1, -8)
+MatNext.Position = UDim2.new(1, -36, 0, 4)
+MatNext.BackgroundColor3 = Color3.fromRGB(50, 42, 85)
+MatNext.Text = "▶"
+MatNext.TextColor3 = Theme.Green
+MatNext.Font = Enum.Font.GothamBold
+MatNext.TextSize = 11
+addCorner(MatNext, 6)
+
+local MatTitle = Instance.new("TextLabel", MatRow)
+MatTitle.Size = UDim2.new(1, -80, 1, 0)
+MatTitle.Position = UDim2.new(0, 40, 0, 0)
+MatTitle.BackgroundTransparency = 1
+MatTitle.TextColor3 = Theme.Text
+MatTitle.Font = Enum.Font.GothamMedium
+MatTitle.TextSize = 11
+MatTitle.TextTruncate = Enum.TextTruncate.AtEnd
 
 updateMaterialSelectorText = function()
     local curMat = Config.SelectedMaterial or "Fish Tail"
     local vnName = MaterialVietnameseNames[curMat] or curMat
     local curCount = State.InventoryCounts[curMat] or 0
-    MatSelectBtn.Text = string.format("📦 [%d/%d] %s — %s [Có: %d]", MatIdx, #MatNames, curMat, vnName, curCount)
+    MatTitle.Text = string.format("[%d/%d] %s — %s [%d]", MatIdx, #MatNames, curMat, vnName, curCount)
 end
 updateMaterialSelectorText()
 
-local function stepSelectedMaterial(delta)
+local function stepMat(delta)
     MatIdx = ((MatIdx - 1 + delta) % #MatNames) + 1
     Config.SelectedMaterial = MatNames[MatIdx]
     State.LockedMob = nil
@@ -5246,130 +5565,130 @@ local function stepSelectedMaterial(delta)
     State.LastMobSeenClock = os.clock()
     updateDashboardUI()
     if Config.AutoMaterial and updateStatusUI then
-        updateStatusUI("Đổi nguyên liệu cần cày -> " .. Config.SelectedMaterial .. " (" .. (MaterialVietnameseNames[Config.SelectedMaterial] or "") .. ")", Color3.fromRGB(130, 215, 255))
+        updateStatusUI("Đổi nguyên liệu -> " .. Config.SelectedMaterial .. " (" .. (MaterialVietnameseNames[Config.SelectedMaterial] or "") .. ")", Theme.Accent)
     end
     saveConfig()
 end
+MatPrev.MouseButton1Click:Connect(function() stepMat(-1) end)
+MatNext.MouseButton1Click:Connect(function() stepMat(1) end)
 
-MatSelectBtn.MouseButton1Click:Connect(function() stepSelectedMaterial(1) end)
-MatNextBtn.MouseButton1Click:Connect(function() stepSelectedMaterial(1) end)
-MatPrevBtn.MouseButton1Click:Connect(function() stepSelectedMaterial(-1) end)
+createSectionHeader(farmPage, "🍰 ĐẢO BÁNH & KATA", 10)
 
-local Weapons = { "Melee", "Sword", "Blox Fruit" }
-local WpIdx = 1
-for i, w in ipairs(Weapons) do
-    if w == Config.SelectWeapon then WpIdx = i; break end
-end
-
-local WpBtn = Instance.new("TextButton")
-WpBtn.LayoutOrder = 6
-WpBtn.Size = UDim2.new(1, -10, 0, 34)
-WpBtn.BackgroundColor3 = Color3.fromRGB(32, 27, 55)
-WpBtn.Text = "🗡️ Vũ Khí Farm Level: " .. tostring(Config.SelectWeapon) .. "  —  [Nhấn Để Đổi]"
-WpBtn.TextColor3 = Color3.fromRGB(255, 215, 90)
-WpBtn.Font = Enum.Font.GothamBold
-WpBtn.TextSize = 12
-WpBtn.Parent = Scroll
-Instance.new("UICorner", WpBtn).CornerRadius = UDim.new(0, 8)
-attachSwipeHandler(WpBtn)
-
-WpBtn.MouseButton1Click:Connect(function()
-    WpIdx = (WpIdx % #Weapons) + 1
-    Config.SelectWeapon = Weapons[WpIdx]
-    WpBtn.Text = "🗡️ Vũ Khí Farm Level: " .. Config.SelectWeapon .. "  —  [Nhấn Để Đổi]"
-    updateDashboardUI()
-    saveConfig()
-end)
-
-createToggleRow("⚡ Fast Attack Đa Nhịp (Đánh Siêu Nhanh & Chống Kẹt)", Config.FastAttack, 7, function(v)
-    Config.FastAttack = v
-end)
-
-local FaModeOrder = { "SuperFast", "HyperBurst", "SafeHuman" }
-local FaModeIdx = 1
-for i, m in ipairs(FaModeOrder) do
-    if m == Config.FastAttackMode then FaModeIdx = i; break end
-end
-Config.FastAttackMode = FaModeOrder[FaModeIdx]
-
-local FaModeBtn = Instance.new("TextButton")
-FaModeBtn.LayoutOrder = 7
-FaModeBtn.Size = UDim2.new(1, -10, 0, 34)
-FaModeBtn.BackgroundColor3 = Color3.fromRGB(32, 27, 55)
-FaModeBtn.Text = "🚀 Chế Độ Đánh Nhanh: " .. (FastAttackModes[Config.FastAttackMode] and FastAttackModes[Config.FastAttackMode].Label or Config.FastAttackMode) .. " — [Nhấn Đổi]"
-FaModeBtn.TextColor3 = Color3.fromRGB(130, 255, 195)
-FaModeBtn.Font = Enum.Font.GothamBold
-FaModeBtn.TextSize = 11
-FaModeBtn.Parent = Scroll
-Instance.new("UICorner", FaModeBtn).CornerRadius = UDim.new(0, 8)
-attachSwipeHandler(FaModeBtn)
-
-FaModeBtn.MouseButton1Click:Connect(function()
-    FaModeIdx = (FaModeIdx % #FaModeOrder) + 1
-    Config.FastAttackMode = FaModeOrder[FaModeIdx]
-    local mInfo = FastAttackModes[Config.FastAttackMode]
-    FaModeBtn.Text = "🚀 Chế Độ Đánh Nhanh: " .. (mInfo and mInfo.Label or Config.FastAttackMode) .. " — [Nhấn Đổi]"
-    if updateStatusUI then
-        updateStatusUI("Đã chuyển chế độ Fast Attack -> " .. (mInfo and mInfo.Label or Config.FastAttackMode), Color3.fromRGB(130, 255, 195))
+local _, _, setKata = createToggleRow(farmPage, "🍰 Auto Farm Cake Queen / Kata (Quái & Boss)", Config.AutoFarmKata, 11, function(v)
+    Config.AutoFarmKata = v
+    State.LastMobSeenClock = os.clock()
+    if v then
+        State.ActiveMainMode = "Kata"
+        Config.ActiveMainMode = "Kata"
+        State.IsHopping = false
+        State.LockedMob = nil
+        State.PosMon = nil
+        State.SpawnPointIndex = 1
+        State.ArrivedAtSpawnClock = nil
+        updateStatusUI("Bắt đầu Farm Quái Đảo Bánh & Đánh Kata...", Theme.Yellow)
+    elseif not isAnyAutomationActive() then
+        stopTween()
+        removeAntiFall()
+        updateStatusUI("Đã tạm dừng Auto Farm Kata", Theme.Yellow)
     end
-    saveConfig()
+    updateQuickKata(v)
+end)
+syncToggles.Kata = setKata
+
+createToggleRow(farmPage, "🔔 Tự Động Triệu Hồi Kata (Mở Cổng Khi Đủ 500 Quái)", Config.AutoSummonKata, 12, function(v)
+    Config.AutoSummonKata = v
+    if v then
+        Util.safeCall("trySummonKataPortal", trySummonKataPortal, 0)
+        updateStatusUI("Đã BẬT Tự Động Triệu Hồi Kata", Theme.Green)
+    else
+        updateStatusUI("Đã TẮT Tự Động Triệu Hồi Kata", Theme.Yellow)
+    end
 end)
 
-createToggleRow("🧲 Bring Mob (Gom Quái & Khóa Mỏ Neo Phẳng)", Config.BringMob, 8, function(v)
-    Config.BringMob = v
+createSectionHeader(farmPage, "🦴 FARM XƯƠNG (BONES)", 13)
+
+createToggleRow(farmPage, "🦴 Auto Đổi Xương Ngẫu Nhiên (Random Bones)", Config.AutoRandomBones, 14, function(v)
+    Config.AutoRandomBones = v
 end)
 
-createToggleRow("💾 Auto Lưu Config (Tự Động Lưu Mọi Chức Năng)", Config.AutoSaveConfig, 9, function(v)
-    Config.AutoSaveConfig = v
-    if v then saveConfig() end
+-- =========================================================================
+-- TAB 3: GACHA (Gacha Trái, Xương Death King, Moon Phase Event)
+-- =========================================================================
+local gachaPage = pages["Gacha"]
+
+createSectionHeader(gachaPage, "🎲 GACHA TRÁI ÁC QUỶ", 1)
+
+createActionRow(gachaPage, "🍇 Mua Random Trái Ác Quỷ (Dealer Cousin)", "Quay Trái", Color3.fromRGB(115, 60, 185), 2, function()
+    Util.spawnTracked("GachaFruit", function()
+        updateStatusUI("Đang mua Trái Ác Quỷ ngẫu nhiên...", Theme.Yellow)
+        local ok, res = pcall(function()
+            return CommF_:InvokeServer("Cousin", "Buy")
+        end)
+        if ok then
+            updateStatusUI("Đã quay Trái Ác Quỷ! Kiểm tra túi đồ.", Theme.Green)
+        else
+            updateStatusUI("Lỗi hoặc chưa đủ tiền/chưa hồi chiêu!", Theme.Red)
+        end
+    end)
 end)
 
-createToggleRow("🌐 Tự Hop Server Khi Trống Bãi / Thiếu Boss Key", Config.AutoHopWhenEmpty, 10, function(v)
-    Config.AutoHopWhenEmpty = v
+createSectionHeader(gachaPage, "🦴 GACHA XƯƠNG (DEATH KING)", 3)
+
+createActionRow(gachaPage, "🦴 Đổi Xương Nhận Quà (Death King Random)", "Đổi Quà", Color3.fromRGB(80, 50, 140), 4, function()
+    Util.spawnTracked("RollBones", function()
+        updateStatusUI("Đang đổi 50 Xương tại Death King...", Theme.Yellow)
+        local ok, res = pcall(function()
+            return CommF_:InvokeServer("Bones", "Buy", 1, 1)
+        end)
+        if ok then
+            updateStatusUI("Đã đổi Xương thành công!", Theme.Green)
+            refreshInventoryCounts(true)
+        else
+            updateStatusUI("Chưa đủ 50 Xương hoặc đã hết lượt đổi!", Theme.Red)
+        end
+    end)
 end)
 
-local HopNearFullMoonBtn = Instance.new("TextButton")
-HopNearFullMoonBtn.Name = "HopNearFullMoonBtn"
-HopNearFullMoonBtn.LayoutOrder = 4
-HopNearFullMoonBtn.Size = UDim2.new(1, -10, 0, 36)
-HopNearFullMoonBtn.BackgroundColor3 = Color3.fromRGB(38, 30, 68)
-HopNearFullMoonBtn.Text = "🌕 Vào Server Gần Full Moon (4/5 - 5/5) — [Bấm Vào]"
-HopNearFullMoonBtn.TextColor3 = Color3.fromRGB(255, 225, 95)
-HopNearFullMoonBtn.Font = Enum.Font.GothamBold
-HopNearFullMoonBtn.TextSize = 11
-HopNearFullMoonBtn.Parent = Scroll
-Instance.new("UICorner", HopNearFullMoonBtn).CornerRadius = UDim.new(0, 8)
-local MoonBtnStroke = Instance.new("UIStroke", HopNearFullMoonBtn)
-MoonBtnStroke.Color = Color3.fromRGB(255, 215, 85)
-MoonBtnStroke.Thickness = 1.3
-attachSwipeHandler(HopNearFullMoonBtn)
+createSectionHeader(gachaPage, "🌕 SỰ KIỆN MẶT TRĂNG (FULL MOON EVENT)", 5)
+
+local HopMoonBtn = Instance.new("TextButton")
+HopMoonBtn.LayoutOrder = 6
+HopMoonBtn.Size = UDim2.new(1, 0, 0, 38)
+HopMoonBtn.BackgroundColor3 = Color3.fromRGB(36, 28, 62)
+HopMoonBtn.Text = "🌕 Vào Server Gần Full Moon (4/5 - 5/5) — [Bấm Vào]"
+HopMoonBtn.TextColor3 = Theme.Yellow
+HopMoonBtn.Font = Enum.Font.GothamBold
+HopMoonBtn.TextSize = 11
+HopMoonBtn.Parent = gachaPage
+addCorner(HopMoonBtn, 8)
+local MoonStroke = addStroke(HopMoonBtn, Theme.Yellow, 1.3)
 
 updateMoonButtonText = function()
     local moon = getMoonPhaseInfo()
     if Config.AutoHopNearFullMoon then
-        HopNearFullMoonBtn.Text = string.format("🌕 Đang Tìm Server Gần Full Moon... [%s | %s] — [Bấm Để Dừng]", moon.ShortName, moon.TimeStr)
-        HopNearFullMoonBtn.TextColor3 = Color3.fromRGB(120, 255, 165)
-        MoonBtnStroke.Color = Color3.fromRGB(100, 255, 150)
+        HopMoonBtn.Text = string.format("🌕 Đang Tìm Server FM... [%s | %s] — [Bấm Dừng]", moon.ShortName, moon.TimeStr)
+        HopMoonBtn.TextColor3 = Theme.Green
+        MoonStroke.Color = Theme.Green
     elseif moon.IsTargetMoon then
-        HopNearFullMoonBtn.Text = string.format("🌕 Vào Server Gần Full Moon [Hiện tại: %s ✅ | %s] — [Bấm Vào]", moon.ShortName, moon.TimeStr)
-        HopNearFullMoonBtn.TextColor3 = Color3.fromRGB(125, 255, 170)
-        MoonBtnStroke.Color = Color3.fromRGB(110, 255, 160)
+        HopMoonBtn.Text = string.format("🌕 Server FM [%s ✅ | %s] — [Bấm Vào]", moon.ShortName, moon.TimeStr)
+        HopMoonBtn.TextColor3 = Theme.Green
+        MoonStroke.Color = Theme.Green
     else
-        HopNearFullMoonBtn.Text = string.format("🌕 Vào Server Gần Full Moon [Hiện tại: %s | %s] — [Bấm Vào]", moon.ShortName, moon.TimeStr)
-        HopNearFullMoonBtn.TextColor3 = Color3.fromRGB(255, 225, 95)
-        MoonBtnStroke.Color = Color3.fromRGB(255, 215, 85)
+        HopMoonBtn.Text = string.format("🌕 Vào Server Gần Full Moon [%s | %s] — [Bấm Vào]", moon.ShortName, moon.TimeStr)
+        HopMoonBtn.TextColor3 = Theme.Yellow
+        MoonStroke.Color = Theme.Yellow
     end
 end
 updateMoonButtonText()
 
-HopNearFullMoonBtn.MouseButton1Click:Connect(function()
+HopMoonBtn.MouseButton1Click:Connect(function()
     if Config.AutoHopNearFullMoon and State.IsHopping then
         Config.AutoHopNearFullMoon = false
         State.IsHopping = false
         saveConfig()
         updateMoonButtonText()
         if updateStatusUI then
-            updateStatusUI("🛑 Đã dừng tìm Server Gần Full Moon", Color3.fromRGB(255, 180, 100))
+            updateStatusUI("🛑 Đã dừng tìm Server Gần Full Moon", Theme.Yellow)
         end
         return
     end
@@ -5382,7 +5701,7 @@ HopNearFullMoonBtn.MouseButton1Click:Connect(function()
             saveConfig()
             updateMoonButtonText()
             if updateStatusUI then
-                updateStatusUI("🎉 Server hiện tại ĐÃ LÀ " .. moon.Name .. " (" .. moon.TimeStr .. ")! (Bấm thêm 1 lần nữa nếu muốn đổi sang Server Gần Full Moon khác)", Color3.fromRGB(115, 255, 165))
+                updateStatusUI("🎉 Server hiện tại ĐÃ LÀ " .. moon.Name .. " (" .. moon.TimeStr .. ")!", Theme.Green)
             end
             return
         end
@@ -5396,58 +5715,74 @@ HopNearFullMoonBtn.MouseButton1Click:Connect(function()
     hopToServer("Normal", "Tìm Server Gần Full Moon (" .. moon.ShortName .. ")")
 end)
 
-createToggleRow("🐉 Auto Tìm Đảo Leviathan (Hối Lộ Spy + Ra Tầng 6 Tìm Frozen Dimension)", Config.AutoFindLeviathan, 4, function(v)
-    Config.AutoFindLeviathan = v
+-- =========================================================================
+-- TAB 4: STORE (Chu trình Godhuman, Mua Võ, Kỹ Năng, Haki, Gear V4)
+-- =========================================================================
+local storePage = pages["Store"]
+
+createSectionHeader(storePage, "👑 CHU TRÌNH GODHUMAN (AUTO 9 VÕ + MASTERY + NL)", 1)
+
+local _, _, setGodhuman = createToggleRow(storePage, "👑 Auto Get Godhuman (Full 9 Võ + 400 Mas + NL)", Config.AutoGodhuman, 2, function(v)
+    Config.AutoGodhuman = v
     State.LastMobSeenClock = os.clock()
     if v then
-        State.ActiveMainMode = "FindLeviathan"
-        Config.ActiveMainMode = "FindLeviathan"
+        State.ActiveMainMode = "Godhuman"
+        Config.ActiveMainMode = "Godhuman"
         State.IsHopping = false
         State.LockedMob = nil
         State.PosMon = nil
-        updateStatusUI("🐉 Bắt đầu Auto Tìm Đảo Leviathan (Hối lộ Spy + Tìm Frozen Dimension)...", Color3.fromRGB(130, 235, 255))
+        updateStatusUI("Bắt đầu chu trình Auto Godhuman...", Theme.Yellow)
     elseif not isAnyAutomationActive() then
         stopTween()
         removeAntiFall()
-        updateStatusUI("Đã tạm dừng Auto Tìm Đảo Leviathan", Color3.fromRGB(255, 180, 100))
+        updateStatusUI("Đã tạm dừng Auto Godhuman", Theme.Yellow)
     end
+    updateQuickGodhuman(v)
 end)
-Scroll:GetChildren()[#Scroll:GetChildren()].Name = "AutoFindLeviathanBtn"
+syncToggles.Godhuman = setGodhuman
 
-createToggleRow("⚔️ Auto Đánh Leviathan (Tự Đổi Sang Đuôi Khác Khi Đủ Dame -> Đánh Đầu)", Config.AutoAttackLeviathan, 4, function(v)
-    Config.AutoAttackLeviathan = v
-    State.LastMobSeenClock = os.clock()
-    if v then
-        State.ActiveMainMode = "AttackLeviathan"
-        Config.ActiveMainMode = "AttackLeviathan"
-        State.IsHopping = false
-        State.LockedMob = nil
-        State.PosMon = nil
-        updateStatusUI("⚔️ Bắt đầu Auto Đánh Leviathan (Tự động chia đủ >=15% Dame mỗi đuôi rồi đổi đuôi)...", Color3.fromRGB(115, 255, 170))
-    elseif not isAnyAutomationActive() then
-        stopTween()
-        removeAntiFall()
-        updateStatusUI("Đã tạm dừng Auto Đánh Leviathan", Color3.fromRGB(255, 180, 100))
-    end
+createSectionHeader(storePage, "🥊 MUA CÁC MÔN VÕ (FIGHTING STYLES)", 3)
+
+local function buyStyleButton(title, remoteName, order)
+    createActionRow(storePage, title, "Mua Ngay", Color3.fromRGB(55, 45, 95), order, function()
+        Util.spawnTracked("BuyStyle_" .. remoteName, function()
+            updateStatusUI("Đang mua " .. remoteName .. "...", Theme.Yellow)
+            local ok, res = pcall(function()
+                return CommF_:InvokeServer(remoteName)
+            end)
+            if ok then
+                updateStatusUI("Đã gửi yêu cầu mua " .. remoteName .. "!", Theme.Green)
+            else
+                updateStatusUI("Không mua được " .. remoteName .. "! (Thiếu tiền/Mastery/NL)", Theme.Red)
+            end
+        end)
+    end)
+end
+
+buyStyleButton("🥋 Mua Superhuman (3M Beli / 400 Mas V1)", "BuySuperhuman", 4)
+buyStyleButton("🔥 Mua Death Step (2.5M Beli + 5K F / Chân Đen 400)", "BuyDeathStep", 5)
+buyStyleButton("💧 Mua Sharkman Karate (2.5M Beli + 5K F / Water 400)", "BuySharkmanKarate", 6)
+buyStyleButton("⚡ Mua Electric Claw (3M Beli + 5K F / Electro 400)", "BuyElectricClaw", 7)
+buyStyleButton("🐉 Mua Dragon Talon (3M Beli + 5K F / Dragon 400)", "BuyDragonTalon", 8)
+buyStyleButton("👑 Mua Godhuman (5M Beli + 5K F / Full 400 Mas)", "BuyGodhuman", 9)
+
+createSectionHeader(storePage, "⚔️ NÂNG CẤP KỸ NĂNG & HAKI", 10)
+
+createActionRow(storePage, "🛡️ Mua Haki Vũ Trang (Buso Haki - 25K Beli)", "Mua Haki", Color3.fromRGB(45, 60, 95), 11, function()
+    pcall(function() CommF_:InvokeServer("BuyHaki", "Buso") end)
 end)
-Scroll:GetChildren()[#Scroll:GetChildren()].Name = "AutoAttackLeviathanBtn"
 
-createToggleRow("👥 Giả Lập 5 Player Trên Thuyền Beast Hunter (Bypass Điều Kiện 5 Người)", Config.Spoof5PlayersBoat, 4, function(v)
-    Config.Spoof5PlayersBoat = v
-    if v then
-        local cnt = executeSpoof5PlayersBoatStep()
-        updateStatusUI(
-            string.format("👥 Đã bật Giả Lập 5 Player Trên Thuyền Beast Hunter (Đang gán %d/5 ghế + Gói nhóm 5 người)!", math.max(cnt, 5)),
-            Color3.fromRGB(255, 215, 95)
-        )
-    else
-        cleanupSpoofedBoatPlayers()
-        updateStatusUI("Đã tắt Giả Lập 5 Player Trên Thuyền Beast Hunter", Color3.fromRGB(255, 180, 100))
-    end
+createActionRow(storePage, "🦘 Mua Nhảy Không Trung (Geppo / Air Jump - 10K Beli)", "Mua Geppo", Color3.fromRGB(45, 60, 95), 12, function()
+    pcall(function() CommF_:InvokeServer("BuyHaki", "Geppo") end)
 end)
-Scroll:GetChildren()[#Scroll:GetChildren()].Name = "Spoof5PlayersBoatBtn"
 
-createToggleRow("⚙️ Auto Bay Tới Chỗ NPC Mua Gear V4 (Qua NPC Đảo Great Tree)", Config.AutoFlyBuyGear, 4, function(v)
+createActionRow(storePage, "⚡ Mua Lướt Nhanh (Soru / Flash Step - 100K Beli)", "Mua Soru", Color3.fromRGB(45, 60, 95), 13, function()
+    pcall(function() CommF_:InvokeServer("BuyHaki", "Soru") end)
+end)
+
+createSectionHeader(storePage, "🌳 GEAR TỘC V4 (TEMPLE OF TIME)", 14)
+
+createToggleRow(storePage, "⚙️ Auto Bay Mua Gear V4 (NPC Ancient One)", Config.AutoFlyBuyGear, 15, function(v)
     Config.AutoFlyBuyGear = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5458,33 +5793,84 @@ createToggleRow("⚙️ Auto Bay Tới Chỗ NPC Mua Gear V4 (Qua NPC Đảo Gre
         State.VisitedAncientOneNpc = false
         State.LockedMob = nil
         State.PosMon = nil
-        updateStatusUI("🌳 Bắt đầu: Bay lên NPC Đảo Great Tree -> Vào Trial Temple -> Bay tới NPC Mua Gear...", Color3.fromRGB(130, 255, 195))
+        updateStatusUI("Bay lên NPC Đảo Great Tree -> Vào Temple Mua Gear...", Theme.Green)
     elseif not isAnyAutomationActive() then
         stopTween()
         removeAntiFall()
-        updateStatusUI("Đã tạm dừng Auto Bay Chỗ Mua Gear", Color3.fromRGB(255, 180, 100))
+        updateStatusUI("Đã dừng Auto Bay Mua Gear", Theme.Yellow)
     end
 end)
 
-createToggleRow("🚪 Auto Bay Đến Cổng Trial Tộc V4 (Qua NPC Great Tree - Tắt Xuyên Tường)", Config.AutoTrialRaceV4, 4, function(v)
-    Config.AutoTrialRaceV4 = v
-    State.LastMobSeenClock = os.clock()
-    if v then
-        State.ActiveMainMode = "TrialV4"
-        Config.ActiveMainMode = "TrialV4"
-        State.IsHopping = false
-        State.IsHoveringV4Sky = false
-        State.LockedMob = nil
-        State.PosMon = nil
-        updateStatusUI("Bắt đầu Auto Hoàn Thành Trial Tộc V4 (" .. getPlayerRaceName() .. ")...", Color3.fromRGB(255, 225, 95))
-    elseif not isAnyAutomationActive() then
-        stopTween()
-        removeAntiFall()
-        updateStatusUI("Đã tạm dừng Auto Hoàn Thành Trial Tộc V4", Color3.fromRGB(255, 180, 100))
-    end
+-- =========================================================================
+-- TAB 5: TELEPORTS (Chuyển Sea, Hop Server, Hop Ít Người)
+-- =========================================================================
+local tpPage = pages["Teleports"]
+
+createSectionHeader(tpPage, "🚢 CHUYỂN SEA", 1)
+
+local SeaRow = Instance.new("Frame")
+SeaRow.Size = UDim2.new(1, 0, 0, 38)
+SeaRow.BackgroundTransparency = 1
+SeaRow.LayoutOrder = 2
+SeaRow.Parent = tpPage
+
+local seaColors = { Color3.fromRGB(210, 225, 255), Color3.fromRGB(150, 220, 255), Theme.Yellow }
+for si = 1, 3 do
+    local sb = Instance.new("TextButton", SeaRow)
+    sb.Size = UDim2.new(0.32, -2, 1, 0)
+    sb.Position = UDim2.new((si - 1) * 0.34, 0, 0, 0)
+    sb.BackgroundColor3 = Color3.fromRGB(36, 30, 62)
+    sb.Text = "🚢 Chuyển Sea " .. si
+    sb.TextColor3 = seaColors[si]
+    sb.Font = Enum.Font.GothamBold
+    sb.TextSize = 11
+    addCorner(sb, 8)
+    addStroke(sb, Theme.Stroke, 1)
+
+    sb.MouseButton1Click:Connect(function()
+        travelToSea(si)
+    end)
+end
+
+createSectionHeader(tpPage, "🌐 HOP SERVER", 3)
+
+createActionRow(tpPage, "🌐 Hop Server Ngay (Tìm Server Ngẫu Nhiên)", "Hop Ngay", Color3.fromRGB(95, 65, 190), 4, function()
+    State.IsHopping = false
+    hopToServer("Normal", "Hop thủ công")
 end)
 
-createToggleRow("🍫 Auto Train Tộc V4 (Đảo Cacao: Đủ Nộ Bật V4 Bay Lên -> Hết Nộ Đánh Tiếp)", Config.AutoTrainRaceV4, 4, function(v)
+createActionRow(tpPage, "👥 Hop Server Ít Người (Dưới 8 Người)", "Hop Vắng", Color3.fromRGB(75, 55, 160), 5, function()
+    State.IsHopping = false
+    hopToServer("LowPlayers", "Hop server ít người")
+end)
+
+createActionRow(tpPage, "📶 Hop Server Ping Thấp (Ưu Tiên Ping Nhỏ)", "Hop Ping", Color3.fromRGB(65, 50, 145), 6, function()
+    State.IsHopping = false
+    hopToServer("LowPing", "Hop server ping thấp")
+end)
+
+createToggleRow(tpPage, "🔄 Tự Hop Server Khi Trống Bãi / Hết Boss Key", Config.AutoHopWhenEmpty, 7, function(v)
+    Config.AutoHopWhenEmpty = v
+end)
+
+-- =========================================================================
+-- TAB 6: MISC (Tộc V3, V4, Leviathan, Spoof Thuyền, No Stun)
+-- =========================================================================
+local miscPage = pages["Misc"]
+
+createSectionHeader(miscPage, "🧬 TỘC V3 & TỘC V4", 1)
+
+createToggleRow(miscPage, "🧬 Auto Bật Tộc V3 (Tự Kích Hoạt Kỹ Năng Tộc)", Config.AutoRaceV3, 2, function(v)
+    Config.AutoRaceV3 = v
+    if v then Util.safeCall("executeRaceAbilities", executeRaceAbilities) end
+end)
+
+createToggleRow(miscPage, "🔥 Auto Bật Tộc V4 (Tự Thức Tỉnh Khi Đầy Nộ)", Config.AutoRaceV4, 3, function(v)
+    Config.AutoRaceV4 = v
+    if v then Util.safeCall("executeRaceAbilities", executeRaceAbilities) end
+end)
+
+createToggleRow(miscPage, "🍫 Auto Train Tộc V4 (Đảo Cacao: Đầy Nộ Bay Lên)", Config.AutoTrainRaceV4, 4, function(v)
     Config.AutoTrainRaceV4 = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5502,109 +5888,294 @@ createToggleRow("🍫 Auto Train Tộc V4 (Đảo Cacao: Đủ Nộ Bật V4 Bay
         if not isAnyAutomationActive() then
             stopTween()
             removeAntiFall()
-            updateStatusUI("Đã tạm dừng Auto Train Tộc V4", Color3.fromRGB(255, 180, 100))
+            updateStatusUI("Đã tạm dừng Auto Train Tộc V4", Theme.Yellow)
         end
     end
 end)
 
-createToggleRow("🍰 Auto Farm Cake Queen / Kata (Farm Quái & Đánh Kata)", Config.AutoFarmKata, 5, function(v)
-    Config.AutoFarmKata = v
+createToggleRow(miscPage, "🚪 Auto Cổng Trial Tộc V4 (Vào Phòng Trial Theo Tộc)", Config.AutoTrialRaceV4, 5, function(v)
+    Config.AutoTrialRaceV4 = v
     State.LastMobSeenClock = os.clock()
     if v then
-        State.ActiveMainMode = "Kata"
-        Config.ActiveMainMode = "Kata"
+        State.ActiveMainMode = "TrialV4"
+        Config.ActiveMainMode = "TrialV4"
         State.IsHopping = false
+        State.IsHoveringV4Sky = false
         State.LockedMob = nil
         State.PosMon = nil
-        State.SpawnPointIndex = 1
-        State.ArrivedAtSpawnClock = nil
-        updateStatusUI("Bắt đầu Farm Quái Đảo Bánh & Đánh Kata / Cake Queen...", Color3.fromRGB(255, 195, 110))
+        updateStatusUI("Bắt đầu Auto Hoàn Thành Trial Tộc V4 (" .. getPlayerRaceName() .. ")...", Theme.Yellow)
     elseif not isAnyAutomationActive() then
         stopTween()
         removeAntiFall()
-        updateStatusUI("Đã tạm dừng Auto Farm Kata / Cake Queen", Color3.fromRGB(255, 180, 100))
+        updateStatusUI("Đã tạm dừng Auto Hoàn Thành Trial Tộc V4", Theme.Yellow)
     end
 end)
 
-createToggleRow("🔔 Tự Động Triệu Hồi Kata (Auto Mở Cổng Khi Đủ 500 Quái)", Config.AutoSummonKata, 5, function(v)
-    Config.AutoSummonKata = v
+createSectionHeader(miscPage, "🐉 LEVIATHAN & BIỂN SÂU", 6)
+
+local _, _, setLeviathan = createToggleRow(miscPage, "🐉 Auto Tìm Đảo Leviathan (Hối Lộ Spy + Ra Tầng 6)", Config.AutoFindLeviathan, 7, function(v)
+    Config.AutoFindLeviathan = v
+    State.LastMobSeenClock = os.clock()
     if v then
-        Util.safeCall("trySummonKataPortal", trySummonKataPortal, 0)
-        updateStatusUI("Đã BẬT Tự Động Triệu Hồi Kata (Cake Prince / Dough King)", Color3.fromRGB(120, 255, 165))
-    else
-        updateStatusUI("Đã TẮT Tự Động Triệu Hồi Kata (Chỉ farm quái & đánh khi Boss ra)", Color3.fromRGB(255, 210, 120))
+        State.ActiveMainMode = "FindLeviathan"
+        Config.ActiveMainMode = "FindLeviathan"
+        State.IsHopping = false
+        State.LockedMob = nil
+        State.PosMon = nil
+        updateStatusUI("Auto Tìm Đảo Leviathan...", Theme.Accent)
+    elseif not isAnyAutomationActive() then
+        stopTween()
+        removeAntiFall()
+        updateStatusUI("Đã tạm dừng Auto Tìm Đảo Leviathan", Theme.Yellow)
+    end
+    updateQuickLeviathan(v)
+end)
+syncToggles.Leviathan = setLeviathan
+
+createToggleRow(miscPage, "⚔️ Auto Đánh Leviathan (Chia Đủ >=15% Dame Mỗi Đuôi)", Config.AutoAttackLeviathan, 8, function(v)
+    Config.AutoAttackLeviathan = v
+    State.LastMobSeenClock = os.clock()
+    if v then
+        State.ActiveMainMode = "AttackLeviathan"
+        Config.ActiveMainMode = "AttackLeviathan"
+        State.IsHopping = false
+        State.LockedMob = nil
+        State.PosMon = nil
+        updateStatusUI("Bắt đầu Auto Đánh Leviathan...", Theme.Green)
+    elseif not isAnyAutomationActive() then
+        stopTween()
+        removeAntiFall()
+        updateStatusUI("Đã tạm dừng Auto Đánh Leviathan", Theme.Yellow)
     end
 end)
 
-createToggleRow("🧬 Auto Bật Tộc V3 (Tự Kích Hoạt Kỹ Năng Tộc)", Config.AutoRaceV3, 13, function(v)
-    Config.AutoRaceV3 = v
-    if v then Util.safeCall("executeRaceAbilities", executeRaceAbilities) end
+createToggleRow(miscPage, "👥 Giả Lập 5 Player Thuyền Beast Hunter", Config.Spoof5PlayersBoat, 9, function(v)
+    Config.Spoof5PlayersBoat = v
+    if v then
+        local cnt = executeSpoof5PlayersBoatStep()
+        updateStatusUI(string.format("Đã bật Giả Lập 5 Player (%d/5 ghế)!", math.max(cnt, 5)), Theme.Yellow)
+    else
+        cleanupSpoofedBoatPlayers()
+        updateStatusUI("Đã tắt Giả Lập 5 Player", Theme.Yellow)
+    end
 end)
 
-createToggleRow("🔥 Auto Bật Tộc V4 (Tự Thức Tỉnh Khi Đầy Nộ)", Config.AutoRaceV4, 12, function(v)
-    Config.AutoRaceV4 = v
-    if v then Util.safeCall("executeRaceAbilities", executeRaceAbilities) end
+createSectionHeader(miscPage, "🛡️ TIỆN ÍCH AN TOÀN", 10)
+
+createToggleRow(miscPage, "🚫 No Stun (Chống Choáng / Xóa BodyGyro / BodyPosition)", Config.NoStun, 11, function(v)
+    Config.NoStun = v
 end)
 
-local QuickRow = Instance.new("Frame")
-QuickRow.LayoutOrder = 13
-QuickRow.Size = UDim2.new(1, -10, 0, 36)
-QuickRow.BackgroundTransparency = 1
-QuickRow.Parent = Scroll
+-- =========================================================================
+-- TAB 7: SETTINGS (Cấu hình Farm, Gacha, Store, Server, Lưu Config)
+-- =========================================================================
+local settingsPage = pages["Settings"]
 
-local Sea1Btn = Instance.new("TextButton")
-Sea1Btn.Size = UDim2.new(0.24, -3, 1, 0)
-Sea1Btn.BackgroundColor3 = Color3.fromRGB(36, 30, 62)
-Sea1Btn.Text = "🚢 Sea 1"
-Sea1Btn.TextColor3 = Color3.fromRGB(210, 220, 255)
-Sea1Btn.Font = Enum.Font.GothamBold
-Sea1Btn.TextSize = 11
-Sea1Btn.Parent = QuickRow
-Instance.new("UICorner", Sea1Btn).CornerRadius = UDim.new(0, 8)
-Sea1Btn.MouseButton1Click:Connect(function() travelToSea(1) end)
+createSectionHeader(settingsPage, "🌾 CẤU HÌNH COMBAT & FARM", 1)
 
-local Sea2Btn = Instance.new("TextButton")
-Sea2Btn.Size = UDim2.new(0.24, -3, 1, 0)
-Sea2Btn.Position = UDim2.new(0.25, 0, 0, 0)
-Sea2Btn.BackgroundColor3 = Color3.fromRGB(36, 30, 62)
-Sea2Btn.Text = "🚢 Sea 2"
-Sea2Btn.TextColor3 = Color3.fromRGB(150, 220, 255)
-Sea2Btn.Font = Enum.Font.GothamBold
-Sea2Btn.TextSize = 11
-Sea2Btn.Parent = QuickRow
-Instance.new("UICorner", Sea2Btn).CornerRadius = UDim.new(0, 8)
-Sea2Btn.MouseButton1Click:Connect(function() travelToSea(2) end)
-
-local Sea3Btn = Instance.new("TextButton")
-Sea3Btn.Size = UDim2.new(0.24, -3, 1, 0)
-Sea3Btn.Position = UDim2.new(0.50, 0, 0, 0)
-Sea3Btn.BackgroundColor3 = Color3.fromRGB(36, 30, 62)
-Sea3Btn.Text = "🚢 Sea 3"
-Sea3Btn.TextColor3 = Color3.fromRGB(255, 215, 110)
-Sea3Btn.Font = Enum.Font.GothamBold
-Sea3Btn.TextSize = 11
-Sea3Btn.Parent = QuickRow
-Instance.new("UICorner", Sea3Btn).CornerRadius = UDim.new(0, 8)
-Sea3Btn.MouseButton1Click:Connect(function() travelToSea(3) end)
-
-local HopNowBtn = Instance.new("TextButton")
-HopNowBtn.Size = UDim2.new(0.25, 0, 1, 0)
-HopNowBtn.Position = UDim2.new(0.75, 0, 0, 0)
-HopNowBtn.BackgroundColor3 = Color3.fromRGB(105, 70, 205)
-HopNowBtn.Text = "🌐 Hop Ngay"
-HopNowBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-HopNowBtn.Font = Enum.Font.GothamBold
-HopNowBtn.TextSize = 11
-HopNowBtn.Parent = QuickRow
-Instance.new("UICorner", HopNowBtn).CornerRadius = UDim.new(0, 8)
-HopNowBtn.MouseButton1Click:Connect(function()
-    State.IsHopping = false
-    hopToServer("Normal", "Hop thủ công")
+local _, _, setFastAttack = createToggleRow(settingsPage, "⚡ Fast Attack Đa Nhịp (Đánh Nhanh & Chống Kẹt)", Config.FastAttack, 2, function(v)
+    Config.FastAttack = v
+    updateQuickFastAttack(v)
 end)
+syncToggles.FastAttack = setFastAttack
+
+local FaModeOrder = { "SuperFast", "HyperBurst", "SafeHuman" }
+local FaModeIdx = 1
+for i, m in ipairs(FaModeOrder) do
+    if m == Config.FastAttackMode then FaModeIdx = i; break end
+end
+Config.FastAttackMode = FaModeOrder[FaModeIdx]
+
+local FaModeBtn = Instance.new("TextButton")
+FaModeBtn.LayoutOrder = 3
+FaModeBtn.Size = UDim2.new(1, 0, 0, 36)
+FaModeBtn.BackgroundColor3 = Theme.Card
+FaModeBtn.Text = "🚀 Chế Độ Fast Attack: " .. (FastAttackModes[Config.FastAttackMode] and FastAttackModes[Config.FastAttackMode].Label or Config.FastAttackMode) .. " — [Nhấn Đổi]"
+FaModeBtn.TextColor3 = Theme.Green
+FaModeBtn.Font = Enum.Font.GothamBold
+FaModeBtn.TextSize = 11
+FaModeBtn.Parent = settingsPage
+addCorner(FaModeBtn, 8)
+addStroke(FaModeBtn, Theme.Stroke, 1)
+
+FaModeBtn.MouseButton1Click:Connect(function()
+    FaModeIdx = (FaModeIdx % #FaModeOrder) + 1
+    Config.FastAttackMode = FaModeOrder[FaModeIdx]
+    local mInfo = FastAttackModes[Config.FastAttackMode]
+    FaModeBtn.Text = "🚀 Chế Độ Fast Attack: " .. (mInfo and mInfo.Label or Config.FastAttackMode) .. " — [Nhấn Đổi]"
+    if updateStatusUI then
+        updateStatusUI("Đã chuyển Fast Attack -> " .. (mInfo and mInfo.Label or Config.FastAttackMode), Theme.Green)
+    end
+    saveConfig()
+end)
+
+createToggleRow(settingsPage, "🧲 Bring Mob (Gom Quái & Khóa Mỏ Neo Phẳng)", Config.BringMob, 4, function(v)
+    Config.BringMob = v
+end)
+
+createSectionHeader(settingsPage, "🌐 CẤU HÌNH SERVER & HOP", 5)
+
+createToggleRow(settingsPage, "🌐 Tự Động Hop Khi Trống Bãi Quái", Config.AutoHopWhenEmpty, 6, function(v)
+    Config.AutoHopWhenEmpty = v
+end)
+
+createSectionHeader(settingsPage, "💾 CẤU HÌNH LƯU TRỮ & HỆ THỐNG", 7)
+
+createToggleRow(settingsPage, "💾 Auto Lưu Config (Tự Động Lưu Mọi Cài Đặt)", Config.AutoSaveConfig, 8, function(v)
+    Config.AutoSaveConfig = v
+    if v then saveConfig() end
+end)
+
+createActionRow(settingsPage, "💾 Lưu Cấu Hình Ngay Lập Tức", "Lưu Ngay", Color3.fromRGB(50, 110, 80), 9, function()
+    local ok = saveConfig()
+    if ok then
+        updateStatusUI("Đã lưu cấu hình vào " .. ConfigFileName, Theme.Green)
+    else
+        updateStatusUI("Lưu cấu hình thất bại!", Theme.Red)
+    end
+end)
+
+local KeyInfoBox = Instance.new("TextLabel")
+KeyInfoBox.Size = UDim2.new(1, 0, 0, 36)
+KeyInfoBox.BackgroundColor3 = Theme.CardDark
+KeyInfoBox.LayoutOrder = 10
+KeyInfoBox.Text = "⌨️ Phím Đóng/Mở GUI: RightControl (PC)  |  Chạm nút tròn 🌸 (Mobile)"
+KeyInfoBox.TextColor3 = Theme.Dim
+KeyInfoBox.Font = Enum.Font.GothamMedium
+KeyInfoBox.TextSize = 10
+KeyInfoBox.Parent = settingsPage
+addCorner(KeyInfoBox, 8)
+
+-- =========================================================================
+-- TAB 8: ABOUT (Logo Hub, Thông tin Hub, Bản quyền)
+-- =========================================================================
+local aboutPage = pages["About"]
+
+local AboutCard = Instance.new("Frame")
+AboutCard.Size = UDim2.new(1, 0, 0, 160)
+AboutCard.BackgroundColor3 = Theme.Card
+AboutCard.LayoutOrder = 1
+AboutCard.Parent = aboutPage
+addCorner(AboutCard, 10)
+addStroke(AboutCard, Theme.Stroke, 1)
+
+local BigLogo = Instance.new("ImageLabel", AboutCard)
+BigLogo.Size = UDim2.new(0, 60, 0, 60)
+BigLogo.Position = UDim2.new(0, 16, 0, 16)
+BigLogo.BackgroundColor3 = Theme.Bg
+BigLogo.Image = maidAvatarAsset
+BigLogo.ClipsDescendants = true
+BigLogo.Active = false
+addCorner(BigLogo, 30)
+addStroke(BigLogo, Theme.Accent, 2)
+
+local AboutHubName = Instance.new("TextLabel", AboutCard)
+AboutHubName.Size = UDim2.new(1, -96, 0, 24)
+AboutHubName.Position = UDim2.new(0, 88, 0, 18)
+AboutHubName.BackgroundTransparency = 1
+AboutHubName.Text = "🌸 MAID HUB V5.8"
+AboutHubName.TextColor3 = Theme.Accent
+AboutHubName.Font = Enum.Font.GothamBold
+AboutHubName.TextSize = 16
+AboutHubName.TextXAlignment = Enum.TextXAlignment.Left
+
+local AboutSubtitle = Instance.new("TextLabel", AboutCard)
+AboutSubtitle.Size = UDim2.new(1, -96, 0, 18)
+AboutSubtitle.Position = UDim2.new(0, 88, 0, 42)
+AboutSubtitle.BackgroundTransparency = 1
+AboutSubtitle.Text = "Next-Gen Blox Fruits Automation"
+AboutSubtitle.TextColor3 = Theme.Yellow
+AboutSubtitle.Font = Enum.Font.GothamMedium
+AboutSubtitle.TextSize = 11
+AboutSubtitle.TextXAlignment = Enum.TextXAlignment.Left
+
+local AboutDivider = Instance.new("Frame", AboutCard)
+AboutDivider.Size = UDim2.new(1, -32, 0, 1)
+AboutDivider.Position = UDim2.new(0, 16, 0, 88)
+AboutDivider.BackgroundColor3 = Theme.Divider
+AboutDivider.BorderSizePixel = 0
+
+local AboutDesc = Instance.new("TextLabel", AboutCard)
+AboutDesc.Size = UDim2.new(1, -32, 0, 56)
+AboutDesc.Position = UDim2.new(0, 16, 0, 96)
+AboutDesc.BackgroundTransparency = 1
+AboutDesc.Text = "• Nền tảng: Real Executor (PC) & Delta X (Mobile)\n• Tương thích hoàn toàn Sea 1, Sea 2, Sea 3\n• Tự động chống kẹt, Smooth Flight & An toàn tài khoản"
+AboutDesc.TextColor3 = Theme.Dim
+AboutDesc.Font = Enum.Font.GothamMedium
+AboutDesc.TextSize = 10
+AboutDesc.TextXAlignment = Enum.TextXAlignment.Left
+AboutDesc.TextYAlignment = Enum.TextYAlignment.Top
+
+-- =========================================================================
+-- FLOATING TOGGLE BUTTON (Tối ưu cho cả PC và Mobile Delta X)
+-- =========================================================================
+local FloatBtn = Instance.new("TextButton")
+FloatBtn.Name = "MaidHubToggleButton"
+FloatBtn.Size = UDim2.new(0, 50, 0, 50)
+FloatBtn.Position = UDim2.new(0, 16, 0.44, 0)
+FloatBtn.BackgroundColor3 = Color3.fromRGB(22, 19, 38)
+FloatBtn.Text = (maidAvatarAsset ~= "" and "") or "🌸"
+FloatBtn.TextColor3 = Theme.Accent
+FloatBtn.TextSize = 22
+FloatBtn.Font = Enum.Font.GothamBold
+FloatBtn.ClipsDescendants = true
+FloatBtn.Active = true
+FloatBtn.Parent = ScreenGui
+addCorner(FloatBtn, 25)
+addStroke(FloatBtn, Theme.Accent, 2)
+
+local FloatAvatar = Instance.new("ImageLabel")
+FloatAvatar.Name = "MaidAvatarCircle"
+FloatAvatar.Size = UDim2.new(1, 0, 1, 0)
+FloatAvatar.Position = UDim2.new(0, 0, 0, 0)
+FloatAvatar.BackgroundTransparency = 1
+FloatAvatar.Image = maidAvatarAsset
+FloatAvatar.Active = false
+FloatAvatar.Parent = FloatBtn
+addCorner(FloatAvatar, 25)
 
 local function toggleUI()
     MainFrame.Visible = not MainFrame.Visible
 end
+
+local function makeDraggable(handle, frame, isToggleBtn)
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+    local hasMoved = false
+
+    table.insert(State.Connections, handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            hasMoved = false
+            dragStart = input.Position
+            startPos = frame.Position
+        end
+    end))
+
+    table.insert(State.Connections, UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            if delta.Magnitude > 6 then
+                hasMoved = true
+            end
+            frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end))
+
+    table.insert(State.Connections, UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            if isToggleBtn and (not hasMoved) then
+                toggleUI()
+            end
+            dragging = false
+        end
+    end))
+end
+
+makeDraggable(TopBar, MainFrame, false)
+makeDraggable(FloatBtn, FloatBtn, true)
+
 MinBtn.MouseButton1Click:Connect(toggleUI)
 FloatBtn.MouseButton1Click:Connect(toggleUI)
 
@@ -5621,6 +6192,7 @@ task.spawn(function()
 end)
 
 end
+
 
 local function cleanupMaidHub()
     State.Running = false
