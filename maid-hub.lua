@@ -1,19 +1,3 @@
--- ============================================================================
--- 🌸 MAID HUB V5.7 (ALL-IN-ONE) - CIRCULAR MAID AVATAR + AUTO SAVE + V4 TRIAL 🌸
--- Cập nhật & Kiểm thử tự động theo yêu cầu:
--- [1] Hệ thống Bay Mượt Thuần Túy (Pure Linear Flight):
---     - BỎ hoàn toàn dịch chuyển tức thời (bỏ Portal, bỏ nhảy Y, bỏ giật 24 studs).
---     - Nhân vật bay đều từng bước mượt mà theo từng khung hình Heartbeat (Speed * dt)
---       thẳng từ vị trí hiện tại tới mục tiêu, không giật lên xuống, không giật lùi.
--- [2] Chỉnh Tốc Độ Bay theo từng +1 / -1 (kèm nút -10 / +10 & ô nhập số trực tiếp).
--- [3] Vuốt Lên / Vuốt Xuống mượt mà (Hỗ trợ vuốt cảm ứng trực tiếp trên danh sách
---     nút bấm + Tự động tính CanvasSize + Nút cuộn nhanh ▲ / ▼ trên thanh tiêu đề).
--- [4] Auto Lưu Config (Tự động lưu & khôi phục toàn bộ trạng thái bật/tắt, vũ khí,
---     nguyên liệu và tốc độ bay vào file JSON riêng của từng tài khoản).
--- [5] Sửa triệt để Hop Server (3 Tầng: __ServerBrowser + Public API lọc phòng 3-10
---     người tránh phòng 1 người bị khóa 773 + Fallback TeleportService:Teleport).
--- ============================================================================
-
 local env = (getgenv and getgenv()) or _G
 if env.__MaidHubCleanup then
     pcall(env.__MaidHubCleanup)
@@ -27,9 +11,6 @@ end
 
 local unpackFn = table.unpack or unpack
 
--- ============================================================================
--- 1. DỊCH VỤ & CẤU HÌNH TRUNG TÂM (KÈM AUTO SAVE / LOAD CONFIG)
--- ============================================================================
 local function safeGetService(serviceName)
     local ok, svc = pcall(function()
         return game:GetService(serviceName)
@@ -51,7 +32,162 @@ local Lighting = safeGetService("Lighting")
 
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-local CommF_ = Remotes:WaitForChild("CommF_")
+
+local Util = {
+    DebugLog = (env.MaidHubDebug ~= false),
+    Shutdown = false,
+    LogClock = {},
+    LogCount = 0,
+    RemoteCache = {},
+    RemoteCacheCount = 0,
+    RemoteNextSlot = 0,
+    Threads = {},
+    RealCommF = Remotes:WaitForChild("CommF_"),
+    RemoteLimits = {
+        getInventory = 0.9,
+        CakePrinceSpawner = 1.0,
+        Bones = 0.9,
+        InfoLeviathan = 1.0,
+        UpgradeRace = 0.8,
+        RaceV4Progress = 0.4,
+        requestEntrance = 1.0,
+        StartQuest = 0.6,
+        AbandonQuest = 0.6,
+        BuyGodhuman = 1.0,
+        BuyDragonTalon = 1.0,
+        BuySharkmanKarate = 1.0,
+        BuyElectricClaw = 1.0,
+        BuyDeathStep = 1.0,
+        BlackbeardReward = 0.8,
+        OpenLeviathanGate = 1.0,
+        FrozenDimension = 1.0,
+        BuyBoat = 1.5,
+        Buso = 0.5,
+    },
+    RemoteNoThrottle = { TravelMain = true, TravelDressrosa = true, TravelZou = true },
+    RemoteDefaultGap = 0.25,
+    RemoteGlobalGap = 0.12,
+}
+
+function Util.logWarn(tag, err)
+    if not Util.DebugLog then return end
+    local key = tostring(tag) .. "|" .. tostring(err)
+    local now = os.clock()
+    local last = Util.LogClock[key]
+    if last and (now - last) < 8 then return end
+    if Util.LogCount > 200 then
+        Util.LogClock = {}
+        Util.LogCount = 0
+    end
+    if not last then Util.LogCount = Util.LogCount + 1 end
+    Util.LogClock[key] = now
+    warn(string.format("[MaidHub][%s] %s", tostring(tag), tostring(err)))
+end
+
+function Util.safeCall(tag, fn, ...)
+    local ok, res = pcall(fn, ...)
+    if not ok then
+        Util.logWarn(tag, res)
+    end
+    return ok, res
+end
+
+local function buildRemoteSignature(...)
+    local n = select("#", ...)
+    local parts = {}
+    for i = 1, n do
+        local v = select(i, ...)
+        parts[i] = (typeof(v) == "table") and ("tbl:" .. tostring(v)) or tostring(v)
+    end
+    return table.concat(parts, "|")
+end
+
+Util.CommF = {}
+function Util.CommF:InvokeServer(...)
+    local real = Util.RealCommF
+    local cmdKey = tostring((...))
+    if Util.RemoteNoThrottle[cmdKey] then
+        return real:InvokeServer(...)
+    end
+
+    local sig = buildRemoteSignature(...)
+    local now = os.clock()
+    local gap = Util.RemoteLimits[cmdKey] or Util.RemoteDefaultGap
+    local entry = Util.RemoteCache[sig]
+    if entry and (now - entry.t) < gap then
+        return unpackFn(entry.res, 1, entry.res.n)
+    end
+
+    local slot = math.max(now, Util.RemoteNextSlot)
+    Util.RemoteNextSlot = slot + Util.RemoteGlobalGap
+    if slot > now then
+        task.wait(slot - now)
+        if Util.Shutdown then return nil end
+    end
+
+    if not entry then
+        Util.RemoteCacheCount = Util.RemoteCacheCount + 1
+        if Util.RemoteCacheCount > 300 then
+            Util.RemoteCache = {}
+            Util.RemoteCacheCount = 1
+        end
+    end
+
+    local placeholder = { t = os.clock(), res = { n = 0 } }
+    Util.RemoteCache[sig] = placeholder
+
+    local packed = table.pack(pcall(real.InvokeServer, real, ...))
+    if not packed[1] then
+        Util.RemoteCache[sig] = nil
+        Util.logWarn("CommF_:" .. cmdKey, packed[2])
+        error(packed[2], 0)
+    end
+    if cmdKey == "getInventory" and packed[2] == nil then
+        Util.RemoteCache[sig] = nil
+        return nil
+    end
+    placeholder.t = os.clock()
+    placeholder.res = { n = packed.n - 1, unpackFn(packed, 2, packed.n) }
+    return unpackFn(placeholder.res, 1, placeholder.res.n)
+end
+setmetatable(Util.CommF, {
+    __index = function(_, k)
+        local v = Util.RealCommF[k]
+        if type(v) == "function" then
+            return function(_, ...) return v(Util.RealCommF, ...) end
+        end
+        return v
+    end
+})
+
+function Util.spawnTracked(tag, fn)
+    local threads = Util.Threads
+    if #threads >= 24 then
+        for i = #threads, 1, -1 do
+            if coroutine.status(threads[i]) == "dead" then
+                table.remove(threads, i)
+            end
+        end
+    end
+    local th = task.spawn(function()
+        local ok, err = pcall(fn)
+        if not ok then Util.logWarn(tag, err) end
+    end)
+    threads[#threads + 1] = th
+    return th
+end
+
+function Util.cancelAll()
+    local me = coroutine.running()
+    for _, th in ipairs(Util.Threads) do
+        if th ~= me and coroutine.status(th) ~= "dead" then
+            pcall(task.cancel, th)
+        end
+    end
+    Util.Threads = {}
+end
+
+local CommF_ = Util.CommF
 
 local PlaceId = game.PlaceId
 local CurrentJobId = game.JobId
@@ -68,40 +204,42 @@ local LegacyConfigFileName = "StarHub_V4_Config_" .. PlayerSafeName .. ".json"
 local VisitedServersFile = "MaidHub_V5_VisitedServers.json"
 
 local Config = {
-    AutoSaveConfig = true,       -- Tự động lưu mọi cài đặt khi thay đổi
+    AutoSaveConfig = true,
     AutoFarmLevel = false,
     AutoGodhuman = false,
     AutoMaterial = false,
-    AutoFarmKata = false,        -- 1. Farm 500 quái Đảo Bánh & tự đánh Kata (Cake Prince / Dough King) + Cake Queen
-    AutoSummonKata = false,      -- 2. Tự động triệu hồi Kata (mở cổng CakePrinceSpawner khi đủ 500 quái)
-    AutoTrainRaceV4 = false,     -- Tự động Train Tộc V4 tại Đảo Cacao (Đủ nộ bật V4 bay lên cao -> Hết nộ bay xuống đánh tiếp)
-    AutoFlyBuyGear = false,      -- Tự động vào Temple of Time, mua nâng cấp Ancient One & bay tới Đồng Hồ Cổ Đại (Ancient Clock) lắp Gear
-    AutoTrialRaceV4 = false,     -- Tự động hoàn thành Ải Trial Tộc V4 cho đủ 6 Tộc (Mink, Angel/Skypiea, Cyborg, Human, Ghoul, Shark/Fishman)
-    AutoHopNearFullMoon = false, -- Tự động tiếp tục đổi Server cho đến khi vào đúng Server Gần Full Moon (4/5) hoặc Full Moon (5/5)
-    AutoFindLeviathan = false,   -- Tự động hối lộ Spy, mua/lái thuyền Beast Hunter ra tầng biển 6 tìm Frozen Dimension & mở cổng Leviathan
-    AutoAttackLeviathan = false, -- Tự động đánh Leviathan: chia đủ dame (>=15% HP) cho từng đuôi (Leviathan Segment) rồi tự đổi sang đuôi khác trước khi đánh đầu chính
-    Spoof5PlayersBoat = false,   -- Thử nghiệm: Làm giả 4 Player Clone ngồi lấp đầy 5/5 ghế trên thuyền Beast Hunter + gửi gói nhóm 5 người mở cổng Frozen Watcher
-    LeviathanTailDamagePercent = 0.15, -- Ngưỡng dame tối thiểu trên mỗi đuôi Leviathan (15% HP > mức 10% yêu cầu của game để nhận đủ 100% Leviathan Scale rồi đổi đuôi)
+    AutoFarmKata = false,
+    AutoSummonKata = false,
+    AutoTrainRaceV4 = false,
+    AutoFlyBuyGear = false,
+    AutoTrialRaceV4 = false,
+    AutoHopNearFullMoon = false,
+    AutoFindLeviathan = false,
+    AutoAttackLeviathan = false,
+    Spoof5PlayersBoat = false,
+    LeviathanTailDamagePercent = 0.15,
     ActiveMainMode = "None",
     SelectedMaterial = "Fish Tail",
-    SelectWeapon = "Melee",      -- "Melee", "Sword", "Blox Fruit"
+    SelectWeapon = "Melee",
     FastAttack = true,
-    FastAttackMode = "SuperFast", -- "SuperFast" (Siêu Nhanh X2), "HyperBurst" (Cực Nhanh X3), "SafeHuman" (An Toàn)
+    FastAttackMode = "SuperFast",
     BringMob = true,
     AutoBuso = true,
-    AutoRaceV3 = false,          -- Tự động bật kỹ năng Tộc V3 (CommE: ActivateAbility)
-    AutoRaceV4 = false,          -- Tự động thức tỉnh Tộc V4 khi đầy thanh nộ (Awakening)
-    AutoRandomBones = true,      -- Tự động Random Xương (Death King) khi cày Bones / lấy Dragon Talon
+    AutoRaceV3 = false,
+    AutoRaceV4 = false,
+    AutoRandomBones = true,
     NoStun = true,
     AutoHopWhenEmpty = true,
     EmptyMobTimeout = 25,
-    TweenSpeed = 250,            -- Chỉnh từng +1 / -1 (từ 50 đến 400 studs/s)
+    TweenSpeed = 250,
     MinTweenSpeed = 50,
     MaxTweenSpeed = 400,
     FarmDistance = 14,
     BringRadius = 340,
+    BringInterval = 0.12,
+    FastAttackMaxTargets = 20,
     FastAttackDelay = 0.035,
-    MasteryCache = {},           -- Lưu vĩnh viễn các võ đã đủ 400 Mastery để không mua lại khi chuyển Sea
+    MasteryCache = {},
     ToggleKey = Enum.KeyCode.RightControl
 }
 
@@ -138,7 +276,7 @@ local SavedConfigKeys = {
 local function saveConfig()
     if not Config.AutoSaveConfig then return false end
     if not writefile then return false end
-    local ok = pcall(function()
+    local ok, saveErr = pcall(function()
         local dataToSave = {}
         for _, key in ipairs(SavedConfigKeys) do
             dataToSave[key] = Config[key]
@@ -147,6 +285,7 @@ local function saveConfig()
         writefile(ConfigFileName, encoded)
         writefile(LegacyConfigFileName, encoded)
     end)
+    if not ok then Util.logWarn("SaveConfig", saveErr) end
     return ok
 end
 
@@ -164,10 +303,12 @@ local function loadConfig()
     end
 
     local rOk, content = pcall(readfile, targetFile)
-    if not rOk or type(content) ~= "string" or #content == 0 then return false end
+    if not rOk then Util.logWarn("LoadConfig.read", content) return false end
+    if type(content) ~= "string" or #content == 0 then return false end
 
     local dOk, decoded = pcall(HttpService.JSONDecode, HttpService, content)
-    if not dOk or type(decoded) ~= "table" then return false end
+    if not dOk then Util.logWarn("LoadConfig.decode", decoded) return false end
+    if type(decoded) ~= "table" then return false end
 
     for _, key in ipairs(SavedConfigKeys) do
         if decoded[key] ~= nil and type(decoded[key]) == type(Config[key]) then
@@ -178,13 +319,12 @@ local function loadConfig()
     return true
 end
 
--- Tự động nạp lại Config đã lưu ngay khi khởi động script
 loadConfig()
 
 local State = {
     Running = true,
     IsHopping = false,
-    MoveTargetPos = nil,         -- Tọa độ Vector3 đích để nhân vật bay đều tới (không dịch chuyển tức thời)
+    MoveTargetPos = nil,
     LastCharacter = LocalPlayer.Character,
     NeedsMirrorPortalEntry = false,
     IsHoveringV4Sky = false,
@@ -234,14 +374,24 @@ local State = {
 local updateStatusUI
 local updateDashboardUI
 
+local function extractPosition(cfOrVec)
+    if not cfOrVec then return Vector3.zero end
+    if type(cfOrVec) == "table" then
+        if cfOrVec.Position then return cfOrVec.Position end
+        if cfOrVec.X and cfOrVec.Y and cfOrVec.Z then return Vector3.new(cfOrVec.X, cfOrVec.Y, cfOrVec.Z) end
+    end
+    local ok, pos = pcall(function()
+        return cfOrVec.Position or Vector3.new(cfOrVec.X, cfOrVec.Y, cfOrVec.Z)
+    end)
+    if ok and pos then return pos end
+    return cfOrVec
+end
+
 local function toFlatCFrame(cfOrVec, extraY)
-    local p = (type(cfOrVec) == "table" and cfOrVec.Position) and cfOrVec.Position or cfOrVec
+    local p = extractPosition(cfOrVec)
     return CFrame.new(p.X, p.Y + (extraY or 0), p.Z)
 end
 
--- ============================================================================
--- 2. HỆ THỐNG HOP SERVER ĐA TẦNG (ĐẢM BẢO HOẠT ĐỘNG 100% TRÊN MỌI SEA)
--- ============================================================================
 local function loadVisitedServers()
     State.VisitedServers[CurrentJobId] = os.time()
     if readfile and isfile then
@@ -315,13 +465,12 @@ pcall(function()
         table.insert(State.Connections, overlay.ChildAdded:Connect(function(child)
             hookSingleErrorPrompt(child)
             task.wait(0.05)
+            if not State.Running then return end
             dismissTeleportErrorPrompts()
         end))
     end
 end)
 
--- Khởi tạo ngầm giao diện ServerBrowser gốc của Blox Fruits (đặt vùng Singapore và đẩy ra ngoài màn hình)
--- Giúp kích hoạt kịch bản nội bộ để ReplicatedStorage.__ServerBrowser luôn trả danh sách server chuẩn
 local function initBloxFruitsServerBrowser()
     pcall(function()
         local pGui = LocalPlayer:FindFirstChild("PlayerGui")
@@ -398,6 +547,7 @@ local function fetchFromPublicApi(sortOrder)
                 if data.nextPageCursor and data.nextPageCursor ~= "" then
                     cursor = data.nextPageCursor
                     task.wait(0.15)
+                    if not State.Running then break end
                 else
                     break
                 end
@@ -412,9 +562,6 @@ local function fetchFromPublicApi(sortOrder)
     return list
 end
 
--- ============================================================================
--- HỆ THỐNG NHẬN DIỆN PHA MẶT TRĂNG (FULL MOON 5/5 & GẦN FULL MOON 4/5 - 75%)
--- ============================================================================
 local updateMoonButtonText
 
 local function getMoonPhaseInfo()
@@ -440,7 +587,6 @@ local function getMoonPhaseInfo()
     local timeStr = string.format("%02d:%02d", h, m)
     local isNight = (clockTime >= 18.0 or clockTime < 5.0)
 
-    -- 1. Full Moon 5/5 (100%) - Asset ID: 9709149431
     if string.find(tex, "9709149431", 1, true) then
         if clockTime >= 5.0 and clockTime < 12.0 then
             return {
@@ -476,7 +622,6 @@ local function getMoonPhaseInfo()
                 ShortName = "🌕 Sắp FM 5/5"
             }
         end
-    -- 2. Gần Full Moon / Waxing Gibbous 4/5 (75%) - Asset ID: 9709149052
     elseif string.find(tex, "9709149052", 1, true) then
         return {
             Phase = 4,
@@ -488,7 +633,6 @@ local function getMoonPhaseInfo()
             Name = "🌔 Gần Full Moon (4/5 - 75%)",
             ShortName = "🌔 4/5 (75%)"
         }
-    -- 3. Trăng Bán Nguyệt 3/5 (50%) - Asset ID: 9709143733
     elseif string.find(tex, "9709143733", 1, true) then
         return {
             Phase = 3,
@@ -500,7 +644,6 @@ local function getMoonPhaseInfo()
             Name = "🌓 Trăng Bán Nguyệt (3/5 - 50%)",
             ShortName = "🌓 3/5 (50%)"
         }
-    -- 4. Trăng Khuyết Đầu Tháng 2/5 (25%) - Asset ID: 9709149680
     elseif string.find(tex, "9709149680", 1, true) then
         return {
             Phase = 2,
@@ -512,7 +655,6 @@ local function getMoonPhaseInfo()
             Name = "🌒 Trăng Non (2/5 - 25%)",
             ShortName = "🌒 2/5 (25%)"
         }
-    -- 5. Không Trăng / New Moon 0/5 (0%) - Asset ID: 9709135895
     elseif string.find(tex, "9709135895", 1, true) then
         return {
             Phase = 0,
@@ -524,7 +666,6 @@ local function getMoonPhaseInfo()
             Name = "🌑 Không Trăng (0/5 - 0%)",
             ShortName = "🌑 0/5 (0%)"
         }
-    -- 6. Trăng Tàn Sau Full Moon (9709150401, 9709150086, 9709139597)
     elseif string.find(tex, "9709150401", 1, true)
         or string.find(tex, "9709150086", 1, true)
         or string.find(tex, "9709139597", 1, true)
@@ -553,12 +694,6 @@ local function getMoonPhaseInfo()
     }
 end
 
--- Hệ thống Hop Server V4.5 (Chuẩn Blox Fruits / RealKid / Whites / Redz Hub):
--- 1. Tạm ngưng FastAttack & BringMob + nâng nhân vật lên cao (+250 studs) để thoát trạng thái InCombat.
--- 2. Kích hoạt ngầm PlayerGui.ServerBrowser và quét từ trang 1 -> 100 qua ReplicatedStorage.__ServerBrowser.
--- 3. Khi có __ServerBrowser, CHỈ gọi __ServerBrowser:InvokeServer("teleport", jobId) từ phía Server,
---    TUYỆT ĐỐI KHÔNG gọi TeleportService:TeleportToPlaceInstance hay TeleportService:Teleport từ Client
---    ở Sea 2 / Sea 3 (loại bỏ 100% lỗi 773 "Bị hạn chế dịch chuyển").
 local function hopToServer(mode, reason)
     if State.IsHopping then return end
     State.IsHopping = true
@@ -568,11 +703,10 @@ local function hopToServer(mode, reason)
         updateStatusUI("🌐 Đang Hop Server (" .. tostring(reason or mode) .. ")...", Color3.fromRGB(255, 205, 85))
     end
 
-    task.spawn(function()
+    Util.spawnTracked("HopServer", function()
         dismissTeleportErrorPrompts()
         initBloxFruitsServerBrowser()
 
-        -- Nhấc nhân vật lên cao để thoát giao chiến (InCombat) trước khi gửi lệnh dịch chuyển
         pcall(function()
             local char = LocalPlayer.Character
             local root = char and char:FindFirstChild("HumanoidRootPart")
@@ -598,9 +732,16 @@ local function hopToServer(mode, reason)
                 local triedAny = false
                 for page = 1, 100 do
                     if not State.Running or not State.IsHopping then break end
+                    local sbGap = os.clock() - (Util.LastServerBrowserClock or 0)
+                    if sbGap < 0.3 then
+                        task.wait(0.3 - sbGap)
+                        if not State.Running then break end
+                    end
+                    Util.LastServerBrowserClock = os.clock()
                     local ok, servers = pcall(function()
                         return serverBrowser:InvokeServer(page)
                     end)
+                    if not ok then Util.logWarn("ServerBrowser.page", servers) end
 
                     if ok and type(servers) == "table" then
                         local pageCandidates = {}
@@ -643,21 +784,19 @@ local function hopToServer(mode, reason)
 
                             dismissTeleportErrorPrompts()
                             task.spawn(function()
-                                pcall(function()
+                                Util.safeCall("ServerBrowser.teleport", function()
                                     serverBrowser:InvokeServer("teleport", tostring(srv.id))
                                 end)
                             end)
                             task.wait(0.35)
+                            if not State.Running then break end
                             dismissTeleportErrorPrompts()
                         end
                     elseif page == 1 then
-                        -- Nếu trang 1 trả về nil, chuyển xuống nhánh lấy JobId từ API công khai rồi truyền vào __ServerBrowser
                         break
                     end
                 end
 
-                -- Nếu __ServerBrowser:InvokeServer(page) bị giới hạn tốc độ, lấy danh sách JobId từ API công khai
-                -- nhưng VẪN gọi dịch chuyển qua serverBrowser:InvokeServer("teleport", id) (không gọi TeleportToPlaceInstance!)
                 if not triedAny then
                     local apiCandidates = fetchFromPublicApi((mode == "LowPlayers") and "Asc" or "Desc")
                     for _, srv in ipairs(apiCandidates) do
@@ -675,11 +814,12 @@ local function hopToServer(mode, reason)
 
                         dismissTeleportErrorPrompts()
                         task.spawn(function()
-                            pcall(function()
+                            Util.safeCall("ServerBrowser.teleport", function()
                                 serverBrowser:InvokeServer("teleport", tostring(srv.id))
                             end)
                         end)
                         task.wait(0.4)
+                        if not State.Running then break end
                         dismissTeleportErrorPrompts()
                     end
                 end
@@ -689,17 +829,17 @@ local function hopToServer(mode, reason)
             return
         end
 
-        -- Dự phòng: Chỉ khi game KHÔNG có __ServerBrowser mới gọi TeleportToPlaceInstance
         local fallbackCandidates = fetchFromPublicApi((mode == "LowPlayers") and "Asc" or "Desc")
         for _, srv in ipairs(fallbackCandidates) do
             if not State.Running or not State.IsHopping then break end
             State.VisitedServers[srv.id] = os.time()
             saveVisitedServers()
             dismissTeleportErrorPrompts()
-            pcall(function()
+            Util.safeCall("TeleportToPlaceInstance", function()
                 TeleportService:TeleportToPlaceInstance(PlaceId, tostring(srv.id), LocalPlayer)
             end)
             task.wait(1.0)
+            if not State.Running then break end
         end
 
         State.IsHopping = false
@@ -717,7 +857,7 @@ local function travelToSea(targetSea)
     if updateStatusUI then
         updateStatusUI(string.format("🚢 Đang chuyển sang Sea %d...", targetSea), Color3.fromRGB(130, 210, 255))
     end
-    pcall(function()
+    Util.safeCall("travelToSea:L907", function()
         if targetSea == 1 then
             CommF_:InvokeServer("TravelMain")
         elseif targetSea == 2 then
@@ -727,12 +867,12 @@ local function travelToSea(targetSea)
         end
     end)
     task.wait(3.5)
+    if not State.Running then return false end
     return false
 end
 
--- ============================================================================
--- 3. HỆ THỐNG BAY MƯỢT THUẦN TÚY (KHÔNG DỊCH CHUYỂN TỨC THỜI, KHÔNG GIẬT)
--- ============================================================================
+local CachedCombatCtrlTable = nil
+
 local function onPlayerRespawned(newChar)
     State.LastCharacter = newChar
     State.LockedMob = nil
@@ -741,6 +881,7 @@ local function onPlayerRespawned(newChar)
     State.MoveTargetPos = nil
     State.NeedsMirrorPortalEntry = true
     State.IsHoveringV4Sky = false
+    State.ElectricClawRunningToMansion = false
     CachedCombatCtrlTable = nil
     State.LastBossHealth = nil
     State.LastBossDamageClock = os.clock()
@@ -802,7 +943,6 @@ end
 local function removeAntiFall()
     local char = LocalPlayer.Character
     if not char then return end
-    -- Khôi phục va chạm vật lý (CanCollide = true) trước khi gỡ BodyVelocity để nhân vật KHÔNG BAO GIỜ rơi xuyên sàn!
     setCharacterCollision(true)
     for _, partName in ipairs({ "Head", "HumanoidRootPart" }) do
         local p = char:FindFirstChild(partName)
@@ -811,7 +951,6 @@ local function removeAntiFall()
     end
 end
 
--- Đặt mục tiêu bay: Chỉ cập nhật tọa độ đích State.MoveTargetPos, KHÔNG dịch chuyển tức thời!
 local function moveToTarget(rawTargetCFrame)
     local root, hum = getCharacterRoot()
     if not root or not hum or not rawTargetCFrame then return end
@@ -820,23 +959,23 @@ local function moveToTarget(rawTargetCFrame)
         hum.Sit = false
     end
 
-    local targetPos = (type(rawTargetCFrame) == "table" and rawTargetCFrame.Position) and rawTargetCFrame.Position or rawTargetCFrame
+    local targetPos = extractPosition(rawTargetCFrame)
     State.MoveTargetPos = Vector3.new(targetPos.X, targetPos.Y, targetPos.Z)
 
-    -- Hỗ trợ bước di chuyển trong môi trường giả lập đơn luồng nếu Heartbeat chưa kịp chạy giữa 2 lệnh
-    local currentPos = root.Position
-    local diff = State.MoveTargetPos - currentPos
-    local dist = diff.Magnitude
-    if dist > 0.05 then
-        local step = math.min(dist, math.max(Config.MinTweenSpeed, math.min(Config.MaxTweenSpeed, Config.TweenSpeed)) * 0.05)
-        local dir = Vector3.new(diff.X / dist, diff.Y / dist, diff.Z / dist)
-        local nextPos = Vector3.new(currentPos.X + dir.X * step, currentPos.Y + dir.Y * step, currentPos.Z + dir.Z * step)
-        root.CFrame = CFrame.new(nextPos.X, nextPos.Y, nextPos.Z)
+    if (os.clock() - (State.LastHeartbeatFlightClock or -999)) > 0.08 then
+        local currentPos = root.Position
+        local diff = State.MoveTargetPos - currentPos
+        local dist = diff.Magnitude
+        if dist > 0.05 then
+            local step = math.min(dist, math.max(Config.MinTweenSpeed, math.min(Config.MaxTweenSpeed, Config.TweenSpeed)) * 0.05)
+            local dir = Vector3.new(diff.X / dist, diff.Y / dist, diff.Z / dist)
+            local nextPos = Vector3.new(currentPos.X + dir.X * step, currentPos.Y + dir.Y * step, currentPos.Z + dir.Z * step)
+            root.CFrame = CFrame.new(nextPos.X, nextPos.Y, nextPos.Z)
+        end
     end
 end
 
--- Bộ điều khiển bay tuyến tính theo từng khung hình (Heartbeat Linear Stepper)
-local function stepPureFlight(dt)
+local function stepPureFlight(dt, isStepped)
     local char = LocalPlayer.Character
     if not char then return end
 
@@ -845,10 +984,6 @@ local function stepPureFlight(dt)
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not root or not hum or hum.Health <= 0 then return end
 
-    -- BẢO VỆ CHỐNG RƠI XUYÊN SÀN NGÔI ĐỀN THỜI GIAN (Hoạt động KỂ CẢ KHI ĐÃ TẮT TOGGLE!):
-    -- Trong video (00:20 - 00:27), sàn Ngôi Đền Thời Gian ở Y ~ 14890 đôi khi chưa tải kịp va chạm khiến nhân vật rơi xuống vực đen và chết ở Đại Dương.
-    -- Nếu nhân vật đang ở khu vực Ngôi Đền Thời Gian (X > 27500, Y > 10000) mà bị tụt xuống dưới mặt sàn (Y < 14889.0),
-    -- lập tức đỡ nhân vật đứng vững trên mặt sàn (Y = 14893.0) và khóa vận tốc rơi = 0!
     if root.Position.X > 27500 and root.Position.Y > 10000 and root.Position.Y < 14889.0 then
         root.CFrame = CFrame.new(root.Position.X, 14893.0, root.Position.Z)
         root.AssemblyLinearVelocity = Vector3.zero
@@ -858,19 +993,16 @@ local function stepPureFlight(dt)
 
     if not isAnyAutomationActive() then return end
 
-    -- QUAN TRỌNG 1: Nếu đang trong nhịp tương tác NPC dịch chuyển vào Trial Temple -> Gỡ ngay BodyVelocity & thoát sớm TRƯỚC khi tạo lại AntiFall!
     if State.TeleportingToTempleUntil and os.clock() < State.TeleportingToTempleUntil then
         removeAntiFall()
         return
     end
 
-    -- QUAN TRỌNG 2: Nếu nhân vật vừa được dịch chuyển vào trong Trial Temple (Y >= 12000) mà mục tiêu cũ vẫn ở ngoài đảo (Y < 10000) -> Xóa mục tiêu cũ ngay!
     if root.Position.Y >= 12000 and State.MoveTargetPos and State.MoveTargetPos.Y < 10000 then
         State.MoveTargetPos = nil
         return
     end
 
-    -- Xử lý NoClip (Xuyên tường) hoặc Tắt Xuyên Tường (khi bay đến Cửa Trial Tộc V4: State.DisableNoClip == true)
     for _, obj in ipairs(char:GetDescendants()) do
         if obj:IsA("BasePart") then
             if State.DisableNoClip then
@@ -889,7 +1021,6 @@ local function stepPureFlight(dt)
         hum.PlatformStand = false
     end
 
-    -- Chỉ giữ BodyVelocity chống rơi khi đang thực sự bay (State.MoveTargetPos ~= nil) hoặc đang treo V4 trên không / đánh quái
     if State.MoveTargetPos or State.PosMon or State.IsHoveringV4Sky then
         local holdTarget = head or root
         if holdTarget then
@@ -909,34 +1040,42 @@ local function stepPureFlight(dt)
         removeAntiFall()
     end
 
-    -- Di chuyển đều từng bước (Speed * dt) thẳng tới State.MoveTargetPos (0 dịch chuyển tức thời!)
     if State.MoveTargetPos then
-        local frameDt = tonumber(dt) or (1 / 60)
-        if frameDt <= 0 or frameDt > 0.5 then
-            frameDt = 1 / 60
+        local now = os.clock()
+        local shouldStepPos = (not isStepped) or ((now - (State.LastHeartbeatFlightClock or -999)) > 0.05)
+        if not isStepped then
+            State.LastHeartbeatFlightClock = now
         end
 
-        local currentPos = root.Position
-        local targetPos = State.MoveTargetPos
-        local diff = targetPos - currentPos
-        local dist = diff.Magnitude
+        if shouldStepPos then
+            local frameDt = tonumber(dt) or (1 / 60)
+            if frameDt <= 0 or frameDt > 0.5 then
+                frameDt = 1 / 60
+            end
 
-        if dist > 1400 then
-            pcall(function()
-                LocalPlayer:RequestStreamAroundAsync(targetPos)
-            end)
-        end
+            local currentPos = root.Position
+            local targetPos = State.MoveTargetPos
+            local diff = targetPos - currentPos
+            local dist = diff.Magnitude
 
-        local speed = math.max(Config.MinTweenSpeed, math.min(Config.MaxTweenSpeed, tonumber(Config.TweenSpeed) or 250))
-        local maxStep = speed * frameDt
+            if dist > 1400 and (now - (State.LastStreamReqClock or 0)) >= 0.8 then
+                State.LastStreamReqClock = now
+                pcall(function()
+                    LocalPlayer:RequestStreamAroundAsync(targetPos)
+                end)
+            end
 
-        if dist <= maxStep or dist <= 0.5 then
-            root.CFrame = CFrame.new(targetPos.X, targetPos.Y, targetPos.Z)
-        else
-            local nx = currentPos.X + (diff.X / dist) * maxStep
-            local ny = currentPos.Y + (diff.Y / dist) * maxStep
-            local nz = currentPos.Z + (diff.Z / dist) * maxStep
-            root.CFrame = CFrame.new(nx, ny, nz)
+            local speed = math.max(Config.MinTweenSpeed, math.min(Config.MaxTweenSpeed, tonumber(Config.TweenSpeed) or 250))
+            local maxStep = speed * frameDt
+
+            if dist <= maxStep or dist <= 0.5 then
+                root.CFrame = CFrame.new(targetPos.X, targetPos.Y, targetPos.Z)
+            else
+                local nx = currentPos.X + (diff.X / dist) * maxStep
+                local ny = currentPos.Y + (diff.Y / dist) * maxStep
+                local nz = currentPos.Z + (diff.Z / dist) * maxStep
+                root.CFrame = CFrame.new(nx, ny, nz)
+            end
         end
 
         root.AssemblyLinearVelocity = Vector3.zero
@@ -944,16 +1083,13 @@ local function stepPureFlight(dt)
     end
 end
 
-table.insert(State.Connections, RunService.Stepped:Connect(function()
-    stepPureFlight(1 / 60)
+table.insert(State.Connections, RunService.Stepped:Connect(function(_, stepDt)
+    stepPureFlight(stepDt or (1 / 60), true)
 end))
 table.insert(State.Connections, RunService.Heartbeat:Connect(function(dt)
-    stepPureFlight(dt or (1 / 60))
+    stepPureFlight(dt or (1 / 60), false)
 end))
 
--- ============================================================================
--- 4. BẢNG DỮ LIỆU NHIỆM VỤ AUTO FARM LEVEL (SEA 1, SEA 2, SEA 3 ĐẦY ĐỦ)
--- ============================================================================
 local QuestList = {
     [1] = {
         { Min = 1,   Max = 9,   Mon = "Bandit",              QName = "BanditQuest1",     QId = 1, QPos = CFrame.new(1059, 16, 1549),    MPos = CFrame.new(1145, 17, 1634) },
@@ -1044,10 +1180,8 @@ local QuestList = {
         { Min = 2475, Max = 2499, Mon = "Island Boy",        QName = "TikiQuest1",       QId = 2, NPCName = "Tiki Quest Giver 1", QPos = CFrame.new(-16547, 55, -173),  MPos = { CFrame.new(-16901, 84, -192), CFrame.new(-16780, 84, -150) } },
         { Min = 2500, Max = 2524, Mon = "Sun-kissed Warrior",QName = "TikiQuest2",       QId = 1, NPCName = "Tiki Quest Giver 2", QPos = CFrame.new(-16539, 55, 1051),  MPos = { CFrame.new(-16349, 92, 1123), CFrame.new(-16250, 92, 1080) } },
         { Min = 2525, Max = 2549, Mon = "Isle Champion",     QName = "TikiQuest2",       QId = 2, NPCName = "Tiki Quest Giver 2", QPos = CFrame.new(-16539, 55, 1051),  MPos = { CFrame.new(-16641, 85, 1140), CFrame.new(-16750, 85, 1100) } },
-        -- Cập nhật mới: Tiki Outpost Mở Rộng (Lv. 2550 - 2599: TikiQuest3)
         { Min = 2550, Max = 2574, Mon = "Serpent Hunter",    QName = "TikiQuest3",       QId = 1, NPCName = "Tiki Quest Giver 3", QPos = CFrame.new(-16665, 105, 1579), MPos = { CFrame.new(-16587, 106, 1468), CFrame.new(-16521, 106, 1612) }, RequirePresence = true },
         { Min = 2575, Max = 2599, Mon = "Skull Slayer",      QName = "TikiQuest3",       QId = 2, NPCName = "Tiki Quest Giver 3", QPos = CFrame.new(-16665, 105, 1579), MPos = { CFrame.new(-16838, 71, 1648), CFrame.new(-16752, 71, 1595) }, RequirePresence = true },
-        -- Cập nhật mới: Đảo Ngầm Submerged Island (Lv. 2600 - 2850+: SubmergedQuest1 / 2 / 3)
         { Min = 2600, Max = 2624, Mon = "Reef Bandit",       QName = "SubmergedQuest1",  QId = 1, NPCName = "Submerged Quest Giver 1", QPos = CFrame.new(-16539, -450, 1051), MPos = { CFrame.new(-16400, -440, 1150) }, RequirePresence = true },
         { Min = 2625, Max = 2649, Mon = "Coral Pirate",      QName = "SubmergedQuest1",  QId = 2, NPCName = "Submerged Quest Giver 1", QPos = CFrame.new(-16539, -450, 1051), MPos = { CFrame.new(-16650, -440, 1250) }, RequirePresence = true },
         { Min = 2650, Max = 2674, Mon = "Sea Chanter",       QName = "SubmergedQuest2",  QId = 1, NPCName = "Submerged Quest Giver 2", QPos = CFrame.new(-16800, -450, 1400), MPos = { CFrame.new(-16750, -440, 1550) }, RequirePresence = true },
@@ -1075,13 +1209,11 @@ local function isMobMatchingList(actualName, filterList)
     return false
 end
 
--- Tự động tìm tọa độ thực tế của NPC giao nhiệm vụ & Bãi quái trong Workspace (hỗ trợ các đảo mới như TikiQuest3 & Submerged Island)
 local function findDynamicQuestLocations(qInfo)
     local monList = qInfo.AltMons or { qInfo.Mon }
     local foundMobCFrames = {}
     local foundNpcCFrame = nil
 
-    -- 1. Quét tọa độ NPC giao nhiệm vụ trong workspace.NPCs hoặc ReplicatedStorage.NPCs
     if qInfo.NPCName then
         local npcTargetLower = string.lower(qInfo.NPCName)
         for _, folder in ipairs({ workspace:FindFirstChild("NPCs"), ReplicatedStorage:FindFirstChild("NPCs") }) do
@@ -1100,7 +1232,6 @@ local function findDynamicQuestLocations(qInfo)
         end
     end
 
-    -- 2. Quét tọa độ bãi quái trong workspace._WorldOrigin.EnemySpawns & workspace.Enemies
     local origin = workspace:FindFirstChild("_WorldOrigin")
     local spawnsFolder = origin and origin:FindFirstChild("EnemySpawns")
     if spawnsFolder then
@@ -1141,8 +1272,6 @@ local function getQuestForPlayer()
         end
     end
 
-    -- Nếu nhiệm vụ thuộc đảo mới (RequirePresence = true, như Submerged Island / TikiQuest3),
-    -- kiểm tra xem bãi quái hoặc NPC của đảo đó đã mở/tải trong khu vực chưa; nếu chưa thì lùi về bãi cao nhất đang có mặt để không bị đứng kẹt!
     local idx = matchedIdx
     while idx >= 1 do
         local candidate = list[idx]
@@ -1172,7 +1301,6 @@ local function checkQuestStatus(qInfo)
     local mainGui = pGui and pGui:FindFirstChild("Main")
     local questFrame = mainGui and mainGui:FindFirstChild("Quest")
 
-    -- Nếu bảng Quest UI đang hiển thị trên màn hình
     if questFrame and questFrame.Visible then
         State.QuestGuiWasVisible = true
         if State.LastAcceptedQuestName and (State.LastAcceptedQuestName ~= qInfo.QName or State.LastAcceptedQuestId ~= qInfo.QId) then
@@ -1181,17 +1309,12 @@ local function checkQuestStatus(qInfo)
         return true, true
     end
 
-    -- Nếu bảng Quest UI vừa tắt sau khi đã hiện lên (tức là vừa đánh xong đủ 8 quái hoàn thành nhiệm vụ!) -> Xóa Latch để quay về nhận nhiệm vụ mới!
     if State.QuestGuiWasVisible then
         State.QuestGuiWasVisible = false
         State.QuestLatchUntilClock = nil
         return false, true
     end
 
-    -- Cơ chế Chống Đứng Im Tại NPC (Smart Quest Latch):
-    -- Trong giao diện Blox Fruits mới (v26+) hoặc khi đã đạt cấp tối đa / nhiệm vụ bị ẩn khung Quest,
-    -- sau khi nhân vật bay tới NPC và bấm StartQuest, State.QuestLatchUntilClock sẽ giữ trạng thái đang làm nhiệm vụ trong 38s
-    -- để nhân vật LẬP TỨC BAY RA BÃI QUÁI ĐÁNH thay vì đứng im một chỗ ở NPC!
     if State.QuestLatchUntilClock and os.clock() < State.QuestLatchUntilClock then
         if State.LastAcceptedQuestName == qInfo.QName and State.LastAcceptedQuestId == qInfo.QId then
             return true, true
@@ -1223,14 +1346,11 @@ local function getEnemySpawnPoints(mobNamesOrSingle, fallbackCFrameOrList)
     return points
 end
 
--- ============================================================================
--- 5. ĐỌC KHO ĐỒ (INVENTORY) & TIẾN TRÌNH 9 VÕ GODHUMAN
--- ============================================================================
 local RequiredMaterials = {
-    { Name = "Fish Tail",      Required = 20 }, -- 1. Về Sea 1 farm đủ 20 Fish Tail (Đuôi Cá)
-    { Name = "Dragon Scale",   Required = 10 }, -- 2. Farm đủ cá ở Sea 1 -> Lên thẳng Sea 3 farm 10 Dragon Scale (Vảy Rồng)
-    { Name = "Magma Ore",      Required = 20 }, -- 3. Farm 20 Magma Ore (Quặng Magma)
-    { Name = "Mystic Droplet", Required = 10 }  -- 4. Farm 10 Mystic Droplet (Giọt Nước Huyền Bí)
+    { Name = "Fish Tail",      Required = 20 },
+    { Name = "Dragon Scale",   Required = 10 },
+    { Name = "Magma Ore",      Required = 20 },
+    { Name = "Mystic Droplet", Required = 10 }
 }
 
 local FightingStylePipeline = {
@@ -1402,8 +1522,6 @@ local function applySingleItemUpdate(item, targetTable)
     return false
 end
 
--- Nguồn 1 (Real-Time 0ms): Lắng nghe trực tiếp sự kiện CommE.OnClientEvent("ItemChanged", item)
--- Ngay khi đánh quái rớt ra 1 Vảy Rồng (Dragon Scale), 1 Đuôi Cá, Xương... Server gửi sự kiện này về Client!
 pcall(function()
     local commE = Remotes:FindFirstChild("CommE") or (ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("CommE"))
     if commE and commE.OnClientEvent then
@@ -1411,12 +1529,12 @@ pcall(function()
             if method == "ItemChanged" or type(method) == "table" then
                 local payload = (type(method) == "table") and method or arg1
                 if applySingleItemUpdate(payload, State.InventoryCounts) then
-                    if updateDashboardUI then pcall(updateDashboardUI) end
+                    if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
                 elseif type(arg1) == "string" and tonumber(arg2) then
                     local canonical = resolveCanonicalMaterialName(arg1)
                     if canonical and State.InventoryCounts[canonical] ~= nil then
                         State.InventoryCounts[canonical] = tonumber(arg2)
-                        if updateDashboardUI then pcall(updateDashboardUI) end
+                        if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
                     end
                 end
             end
@@ -1424,7 +1542,6 @@ pcall(function()
     end
 end)
 
--- Nguồn 2 (Bộ nhớ Client 0ms): Đọc trực tiếp từ UIController.Inventory (chuẩn Redz Hub) không bị giới hạn tốc độ mạng
 local function readFromUIControllerInventory(targetTable)
     local foundAny = false
     pcall(function()
@@ -1452,18 +1569,15 @@ local function readFromUIControllerInventory(targetTable)
     return foundAny
 end
 
--- Nguồn 3 & 4: Đồng bộ từ CommF_:InvokeServer("getInventory") (có chống Rate-Limit, TUYỆT ĐỐI KHÔNG xóa trắng về 0 khi Server chưa trả bảng mới!)
 local function refreshInventoryCounts(forceNetwork)
-    -- Chỉ gọi Remote "getInventory" tối đa mỗi 1.0s để không bị Server Blox Fruits chặn (trả về nil)
     local now = os.clock()
     if forceNetwork or not State.LastInventoryFetchClock or (now - State.LastInventoryFetchClock) >= 1.0 then
         State.LastInventoryFetchClock = now
         local ok, inv = pcall(function()
             return CommF_:InvokeServer("getInventory")
         end)
+        if not ok then Util.logWarn("getInventory", inv) end
 
-        -- QUAN TRỌNG: Chỉ cập nhật lại bảng đếm khi Server thực sự trả về một bảng (type(inv) == "table")!
-        -- Nếu Server trả về nil do đang hồi chiêu Remote, GIỮ NGUYÊN số lượng hiện có (không bao giờ reset về 0!)
         if ok and type(inv) == "table" then
             local freshCounts = {}
             for k in pairs(State.InventoryCounts) do
@@ -1488,10 +1602,8 @@ local function refreshInventoryCounts(forceNetwork)
         end
     end
 
-    -- Đọc bổ sung từ bộ nhớ UIController.Inventory (nếu có) để cập nhật tức thì mọi nguyên liệu vừa nhặt
     readFromUIControllerInventory(State.InventoryCounts)
 
-    -- Kiểm tra thêm trong Backpack và Character đối với Chìa khóa / Fire Essence / Vật phẩm cầm tay
     local containers = { LocalPlayer:FindFirstChild("Backpack"), LocalPlayer.Character }
     for _, cont in ipairs(containers) do
         if cont then
@@ -1549,7 +1661,6 @@ local function recordStyleMastery(styleEntry, lvl)
     local changed = (State.MasteryCache[styleEntry.ToolName] ~= lvl)
     State.MasteryCache[styleEntry.ToolName] = lvl
 
-    -- Nếu sở hữu Võ V2 (Tử Cước V2, Người Cá V2, Điện V2, Rồng V2), tự động đánh dấu Võ V1 tương ứng đã đạt 400 Mastery!
     if styleEntry.ImpliesV1 then
         for _, v1Name in ipairs(styleEntry.ImpliesV1) do
             State.OwnedStyles[v1Name] = true
@@ -1560,7 +1671,6 @@ local function recordStyleMastery(styleEntry, lvl)
         end
     end
 
-    -- CHỈ lưu vào file JSON các môn võ ĐÃ ĐẠT ĐỦ >= 400 Mastery (các võ < 400 luôn được kiểm tra lại mỗi khi chạy script!)
     local persisted = {}
     for k, v in pairs(State.MasteryCache) do
         if type(v) == "number" and v >= 400 then
@@ -1610,9 +1720,6 @@ local function getCachedMastery(styleEntry)
     return nil
 end
 
--- ============================================================================
--- 6. TRANG BỊ VŨ KHÍ, BUSO HAKI, BRING MOB & FAST ATTACK 4 TẦNG
--- ============================================================================
 local NonWeaponTools = {
     ["Awakening"] = true, ["Thức Tỉnh"] = true, ["Giác Quan Nhạy Bén"] = true, ["Instinct"] = true,
     ["Library Key"] = true, ["Chìa Khóa Thư Viện"] = true, ["Water Key"] = true, ["Chìa Khóa Nước"] = true,
@@ -1649,7 +1756,6 @@ local function isToolMatchingType(tool, weaponType)
     local tip = tostring(tool.ToolTip or "")
     local name = tostring(tool.Name or "")
 
-    -- Nếu truyền tên một môn võ cụ thể (VD: "Dragon Talon"), chỉ khớp đúng môn võ đó (hoặc AltName của nó)
     if weaponType and weaponType ~= "Melee" and weaponType ~= "Sword" and weaponType ~= "Blox Fruit" then
         return isToolMatchingSpecificStyle(tool, weaponType)
     end
@@ -1678,7 +1784,7 @@ local function isToolMatchingType(tool, weaponType)
 end
 
 local function forceEquipTool(hum, char, item)
-    pcall(function()
+    Util.safeCall("forceEquipTool:L1870", function()
         hum:EquipTool(item)
         if item.Parent ~= char then
             item.Parent = char
@@ -1698,7 +1804,6 @@ local function equipWeapon(preferredType)
         return
     end
 
-    -- 1. Nếu truyền tên võ cụ thể, tìm đúng môn võ đó trong Backpack
     if wType ~= "Melee" and wType ~= "Sword" and wType ~= "Blox Fruit" then
         for _, item in ipairs(backpack:GetChildren()) do
             if isToolMatchingSpecificStyle(item, wType) then
@@ -1706,7 +1811,6 @@ local function equipWeapon(preferredType)
                 return
             end
         end
-        -- Nếu không tìm thấy đúng tên, fallback sang nhóm Melee
         if heldTool and isToolMatchingType(heldTool, "Melee") then
             return
         end
@@ -1718,7 +1822,6 @@ local function equipWeapon(preferredType)
         end
     end
 
-    -- 2. Tìm theo nhóm vũ khí ("Melee", "Sword", "Blox Fruit"), bỏ qua các công cụ không phải vũ khí (Awakening / Thức Tỉnh / Chìa Khóa / Chalice)
     local fallbackTool = nil
     for _, item in ipairs(backpack:GetChildren()) do
         if item:IsA("Tool") and not NonWeaponTools[tostring(item.Name or "")] and tostring(item.Name or "") ~= "Awakening" and tostring(item.Name or "") ~= "Thức Tỉnh" then
@@ -1743,7 +1846,6 @@ local function enableBusoHaki()
     end
 end
 
--- Tự động kích hoạt Tộc V3 (CommE: ActivateAbility) & Thức tỉnh Tộc V4 (Awakening.RemoteFunction)
 local function executeRaceAbilities()
     if State.IsHopping then return end
     local char = LocalPlayer.Character
@@ -1751,10 +1853,9 @@ local function executeRaceAbilities()
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then return end
 
-    -- 1. Auto Bật Tộc V3
     if Config.AutoRaceV3 and (os.clock() - (State.LastRaceV3Clock or 0)) >= 0.8 then
         State.LastRaceV3Clock = os.clock()
-        pcall(function()
+        Util.safeCall("executeRaceAbilities:L1946", function()
             local commE = Remotes:FindFirstChild("CommE") or (ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("CommE"))
             if commE then
                 commE:FireServer("ActivateAbility")
@@ -1762,10 +1863,9 @@ local function executeRaceAbilities()
         end)
     end
 
-    -- 2. Auto Bật Tộc V4 (Khi thanh RaceEnergy >= 1 và chưa biến hình RaceTransformed — Hỗ trợ cả "Awakening" & "Thức Tỉnh")
     if (Config.AutoRaceV4 or Config.AutoTrainRaceV4) and (os.clock() - (State.LastRaceV4Clock or 0)) >= 0.35 then
         State.LastRaceV4Clock = os.clock()
-        pcall(function()
+        Util.safeCall("executeRaceAbilities:L1957", function()
             local raceTransformed = char:FindFirstChild("RaceTransformed")
             local raceEnergy = char:FindFirstChild("RaceEnergy")
             local isTransformed = raceTransformed and raceTransformed.Value == true
@@ -1797,11 +1897,12 @@ local function executeRaceAbilities()
     end
 end
 
-task.spawn(function()
+Util.spawnTracked("RaceAbilitiesLoop", function()
     while State.Running do
         task.wait(0.35)
+        if not State.Running then break end
         if Config.AutoRaceV3 or Config.AutoRaceV4 then
-            pcall(executeRaceAbilities)
+            Util.safeCall("executeRaceAbilities", executeRaceAbilities)
         end
     end
 end)
@@ -1821,64 +1922,80 @@ local function isBossMob(mob)
         end
     end
     local mHum = mob:FindFirstChildOfClass("Humanoid")
-    -- Quái thường ở Sea 3 (Tiki Outpost / Submerged Island) có máu khoảng 150,000 - 320,000 HP.
-    -- Chỉ coi là Boss khi MaxHealth >= 500,000 hoặc có chữ Boss / Trùm trong tên!
     if mHum and mHum.MaxHealth and mHum.MaxHealth >= 500000 then
         return true
     end
     return false
 end
 
-table.insert(State.Connections, RunService.Heartbeat:Connect(function()
-    if State.IsHopping or State.IsHoveringV4Sky or not isAnyAutomationActive() or not Config.BringMob or not State.PosMon then
-        return
+do
+    local BRING_SIZE = Vector3.new(60, 60, 60)
+    local PLATFORM_STANDING = 14
+    local bringElapsed = 0
+
+    local function bringSingleMob(mRoot, mHum, posMon)
+        if (mRoot.Position - posMon.Position).Magnitude > 0.75 then
+            mRoot.CFrame = posMon
+        end
+        if mRoot.CanCollide then mRoot.CanCollide = false end
+        if mRoot.Size ~= BRING_SIZE then mRoot.Size = BRING_SIZE end
+        if mRoot.Transparency ~= 0.85 then mRoot.Transparency = 0.85 end
+        if mRoot.AssemblyLinearVelocity.Magnitude > 0.1 then mRoot.AssemblyLinearVelocity = Vector3.zero end
+        if mRoot.AssemblyAngularVelocity.Magnitude > 0.1 then mRoot.AssemblyAngularVelocity = Vector3.zero end
+        if mHum.WalkSpeed ~= 0 then mHum.WalkSpeed = 0 end
+        if mHum.JumpPower ~= 0 then mHum.JumpPower = 0 end
+        local stOk, curState = pcall(mHum.GetState, mHum)
+        if not stOk or (type(curState) == "table" and curState.Value ~= PLATFORM_STANDING) or (typeof and typeof(curState) == "EnumItem" and curState.Value ~= PLATFORM_STANDING) then
+            pcall(mHum.ChangeState, mHum, PLATFORM_STANDING)
+        end
+        local animator = mHum:FindFirstChild("Animator")
+        if animator then animator:Destroy() end
     end
 
-    pcall(function()
-        if sethiddenproperty then
-            sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
+    table.insert(State.Connections, RunService.Heartbeat:Connect(function(dt)
+        if not State.Running then return end
+
+        bringElapsed = bringElapsed + (dt or 0)
+        local interval = math.clamp(tonumber(Config.BringInterval) or 0.12, 0.05, 0.5)
+        if bringElapsed < interval then return end
+        bringElapsed = 0
+
+        if State.IsHopping or State.IsHoveringV4Sky or not isAnyAutomationActive() or not Config.BringMob or not State.PosMon then
+            return
         end
-    end)
 
-    local enemies = workspace:FindFirstChild("Enemies")
-    if not enemies then return end
+        local posMon = State.PosMon
+        if sethiddenproperty and (os.clock() - (State.LastSimRadiusClock or 0)) >= 1.5 then
+            State.LastSimRadiusClock = os.clock()
+            Util.safeCall("BringMob.SimulationRadius", sethiddenproperty, LocalPlayer, "SimulationRadius", math.huge)
+        end
 
-    for _, mob in ipairs(enemies:GetChildren()) do
-        -- QUAN TRỌNG: TUYỆT ĐỐI KHÔNG dùng BringMob (khóa CFrame / ChangeState 14 / xóa Animator) lên BOSS!
-        -- Vì Boss do Server điều khiển, khóa CFrame phía Client sẽ làm hình ảnh Boss đứng im trên tường còn vị trí thật trên Server đi chỗ khác (gây lỗi đánh không mất máu!)
-        if not isBossMob(mob) and (not State.CurrentMonFilter or isMobMatchingList(mob.Name, State.CurrentMonFilter)) then
+        local enemies = workspace:FindFirstChild("Enemies")
+        if not enemies then return end
+
+        local radius = Config.BringRadius
+        local filter = State.CurrentMonFilter
+        for _, mob in ipairs(enemies:GetChildren()) do
             local mRoot = mob:FindFirstChild("HumanoidRootPart")
-            local mHum = mob:FindFirstChildOfClass("Humanoid")
-            if mRoot and mHum and mHum.Health > 0 then
-                if (mRoot.Position - State.PosMon.Position).Magnitude <= Config.BringRadius then
-                    pcall(function()
-                        mRoot.CFrame = State.PosMon
-                        mRoot.CanCollide = false
-                        mRoot.Size = Vector3.new(60, 60, 60)
-                        mRoot.Transparency = 0.85
-                        mRoot.AssemblyLinearVelocity = Vector3.zero
-                        mRoot.AssemblyAngularVelocity = Vector3.zero
-                        mHum.WalkSpeed = 0
-                        mHum.JumpPower = 0
-                        mHum:ChangeState(14)
-                        if mHum:FindFirstChild("Animator") then
-                            mHum.Animator:Destroy()
-                        end
-                    end)
-                end
+            local mHum = mRoot and mob:FindFirstChildOfClass("Humanoid")
+            if mRoot and mHum and mHum.Health > 0
+                and (mRoot.Position - posMon.Position).Magnitude <= radius
+                and not isBossMob(mob)
+                and (not filter or isMobMatchingList(mob.Name, filter)) then
+                local ok, err = pcall(bringSingleMob, mRoot, mHum, posMon)
+                if not ok then Util.logWarn("BringMob", err) end
             end
         end
-    end
-end))
+    end))
+end
 
 local NetRegisterAttack, NetRegisterHit = nil, nil
-local CachedCombatCtrlTable = nil
 local CameraShakerStopped = false
 
 local function stopCameraShakeOnce()
     if CameraShakerStopped then return end
     CameraShakerStopped = true
-    pcall(function()
+    Util.safeCall("stopCameraShakeOnce:L2097", function()
         local util = ReplicatedStorage:FindFirstChild("Util")
         local shaker = util and util:FindFirstChild("CameraShaker")
         if shaker then
@@ -1889,7 +2006,7 @@ local function stopCameraShakeOnce()
 end
 
 local function resolveNetRemotes()
-    pcall(function()
+    Util.safeCall("resolveNetRemotes:L2108", function()
         local modules = ReplicatedStorage:FindFirstChild("Modules")
         local net = modules and modules:FindFirstChild("Net")
         if net then
@@ -1916,7 +2033,6 @@ local FastAttackModes = {
     ["SafeHuman"]  = { Delay = 0.060, Bursts = 1, Jitter = 0.012, Label = "An Toàn (Nhịp Tự Nhiên)" }
 }
 
-
 local function isHoldingValidWeapon(char)
     if not char then return nil end
     local tool = char:FindFirstChildOfClass("Tool")
@@ -1928,7 +2044,7 @@ local function getActiveCombatController()
     local getUpvalues = (debug and debug.getupvalues) or getupvalues
     if not getUpvalues then return nil end
     if not CachedCombatCtrlTable then
-        pcall(function()
+        Util.safeCall("getActiveCombatController:L2147", function()
             local pScripts = LocalPlayer:FindFirstChild("PlayerScripts")
             local cfScript = pScripts and pScripts:FindFirstChild("CombatFramework")
             if cfScript then
@@ -1943,6 +2059,11 @@ local function getActiveCombatController()
 end
 
 local function executeFastAttack()
+    local gateCfg = FastAttackModes[Config.FastAttackMode] or FastAttackModes["SuperFast"]
+    local gateNow = os.clock()
+    if (gateNow - (State.LastFastAttackSend or 0)) < ((gateCfg.Delay or 0.035) * 0.8) then return end
+    State.LastFastAttackSend = gateNow
+
     if State.IsHoveringV4Sky then return end
     if State.ActiveMainMode == "BuyGear" then return end
     if State.ActiveMainMode == "TrialV4" and not State.InCombatTrialRoom then return end
@@ -1952,7 +2073,6 @@ local function executeFastAttack()
     local enemies = workspace:FindFirstChild("Enemies")
     if not char or not root or not hum or not enemies then return end
 
-    -- 1. Kiểm tra bắt buộc nhân vật đang cầm Vũ Khí hợp lệ trên tay trước khi gửi gói đánh (Chống lỗi kẹt đòn / Anti-Kick!)
     local heldTool = isHoldingValidWeapon(char)
     if not heldTool then
         equipWeapon(Config.SelectWeapon)
@@ -1967,16 +2087,22 @@ local function executeFastAttack()
     local netTargetsRoot = {}
     local bladeHits = {}
     local seenModels = {}
+    local seenRoots = {}
+    local targetCount = 0
+    local maxTargets = math.max(1, math.floor(tonumber(Config.FastAttackMaxTargets) or 20))
 
     local function addTargetMob(mob)
-        if not mob or seenModels[mob] then return end
+        if not mob or not mob.Parent or seenModels[mob] then return end
+        if targetCount >= maxTargets then return end
         local mRoot = mob:FindFirstChild("HumanoidRootPart")
         local mHum = mob:FindFirstChildOfClass("Humanoid")
-        if not mRoot or not mHum or mHum.Health <= 0 then return end
+        if not mRoot or not mHum or mHum.Health <= 0 or seenRoots[mRoot] then return end
         local maxReach = (Config.AutoAttackLeviathan or Config.AutoFindLeviathan) and 160 or 75
         if (mRoot.Position - root.Position).Magnitude > maxReach then return end
 
         seenModels[mob] = true
+        seenRoots[mRoot] = true
+        targetCount = targetCount + 1
         local mHead = mob:FindFirstChild("Head") or mRoot
         local mTorso = mob:FindFirstChild("UpperTorso") or mob:FindFirstChild("Torso") or mRoot
 
@@ -1986,13 +2112,11 @@ local function executeFastAttack()
             primaryTorso = mTorso
         end
 
-        -- Mỗi quái chỉ thêm DUY NHẤT 1 mục vào bảng mục tiêu của từng nhịp (Chuẩn cấu trúc Server Blox Fruits, không nhân đôi cùng 1 Model trong 1 gói tin!)
         table.insert(netTargetsHead, { mob, mHead })
         table.insert(netTargetsRoot, { mob, mRoot })
         table.insert(bladeHits, mRoot)
     end
 
-    -- Ưu tiên đưa mục tiêu đang khóa (LockedMob / Boss / Leviathan Segment) lên vị trí đầu tiên (primaryPart)
     local seaBeasts = workspace:FindFirstChild("SeaBeasts")
     if State.LockedMob and (State.LockedMob.Parent == enemies or (seaBeasts and State.LockedMob.Parent == seaBeasts)) then
         addTargetMob(State.LockedMob)
@@ -2002,7 +2126,6 @@ local function executeFastAttack()
         addTargetMob(mob)
     end
 
-    -- Hỗ trợ đánh các đoạn đuôi Leviathan (Leviathan Segment) và đầu Leviathan nằm trong workspace.SeaBeasts
     if seaBeasts then
         for _, sb in ipairs(seaBeasts:GetChildren()) do
             addTargetMob(sb)
@@ -2014,11 +2137,9 @@ local function executeFastAttack()
     local modeCfg = FastAttackModes[Config.FastAttackMode] or FastAttackModes["SuperFast"]
     local bursts = modeCfg.Bursts or 2
 
-    -- 2. Gửi gói tin RE/RegisterAttack & Multi-Burst RE/RegisterHit đã lọc sạch trùng lặp
     if not NetRegisterAttack or not NetRegisterHit then resolveNetRemotes() end
     if NetRegisterAttack and NetRegisterHit then
-        pcall(function()
-            -- Chỉ mở chu kỳ vung đòn 1 lần, sau đó phát các nhịp Hit chuẩn xác lên từng vùng (Head / HumanoidRootPart / UpperTorso)
+        Util.safeCall("executeFastAttack:L2249", function()
             NetRegisterAttack:FireServer(0)
             NetRegisterHit:FireServer(primaryHead or primaryRoot, netTargetsHead)
             if bursts >= 2 then
@@ -2031,8 +2152,7 @@ local function executeFastAttack()
         end)
     end
 
-    -- 3. Xóa hồi chiêu cục bộ trong CombatFramework (Đã lưu bộ nhớ đệm 0ms, không gọi require lặp lại gây giật lag!)
-    pcall(function()
+    Util.safeCall("executeFastAttack:L2264", function()
         local ctrl = getActiveCombatController()
         if ctrl then
             ctrl.timeToNextAttack = 0
@@ -2057,33 +2177,29 @@ local function executeFastAttack()
         end
     end)
 
-    -- 4. Kích hoạt Tool & Click chuột ảo
-    pcall(function()
+    Util.safeCall("executeFastAttack:L2290", function()
         if heldTool then heldTool:Activate() end
     end)
 
-    pcall(function()
+    Util.safeCall("executeFastAttack:L2294", function()
         VirtualUser:CaptureController()
         VirtualUser:ClickButton1(Vector2.new(600, 400))
     end)
 end
 
-task.spawn(function()
+Util.spawnTracked("FastAttackLoop", function()
     while State.Running do
         local modeCfg = FastAttackModes[Config.FastAttackMode] or FastAttackModes["SuperFast"]
         local baseDelay = modeCfg.Delay or Config.FastAttackDelay or 0.035
-        -- Thêm độ lệch ngẫu nhiên siêu nhỏ (Jitter 0..6ms) để nhịp gói tin tự nhiên, không bị khóa tốc độ bởi bộ lọc gói tin đều đặn
         local jitter = (math.random(0, 100) / 100) * (modeCfg.Jitter or 0.005)
         task.wait(baseDelay + jitter)
+        if not State.Running then break end
         if not State.IsHopping and isAnyAutomationActive() and Config.FastAttack then
-            pcall(executeFastAttack)
+            Util.safeCall("executeFastAttack", executeFastAttack)
         end
     end
 end)
 
--- ============================================================================
--- 7. HÀM TÌM & ĐÁNH QUÁI DÙNG CHUNG
--- ============================================================================
 local MaterialSpots = {
     ["Fish Tail"] = {
         PreferredSea = 1,
@@ -2309,23 +2425,21 @@ local MaterialSpots = {
     }
 }
 
--- 4 cụm bãi quái chính trên Đảo Bánh (Cake Island - Sea 3)
 local CakeIslandSpawnHubs = {
-    CFrame.new(-2374, 37, -12125), -- Bãi 1: Cookie Crafter
-    CFrame.new(-1598, 43, -12244), -- Bãi 2: Cake Guard
-    CFrame.new(-1887, 77, -12998), -- Bãi 3: Baking Staff
-    CFrame.new(-2216, 82, -12869)  -- Bãi 4: Head Baker
+    CFrame.new(-2374, 37, -12125),
+    CFrame.new(-1598, 43, -12244),
+    CFrame.new(-1887, 77, -12998),
+    CFrame.new(-2216, 82, -12869)
 }
 local CakeIslandAllMobs = { "Cookie Crafter", "Cake Guard", "Baking Staff", "Head Baker" }
 local CakeIslandBosses  = { "Dough King", "Cake Prince", "Katakuri", "Hoàng Tử Bột", "Hoàng Tử Bánh", "Vua Bột" }
 local CakeQueenBosses   = { "Cake Queen", "Nữ Hoàng Bánh", "Island Empress" }
 
--- 4 cụm bãi quái trên Đảo Cacao (Chocolate Land - Sea 3) & Tọa độ bay lên trời an toàn khi bật Tộc V4
 local CocoaIslandSpawnHubs = {
-    CFrame.new(-21, 80, -12352),  -- Bãi 1: Cocoa Warrior
-    CFrame.new(582, 77, -12463),  -- Bãi 2: Chocolate Bar Battler
-    CFrame.new(165, 76, -12600),  -- Bãi 3: Sweet Thief
-    CFrame.new(134, 77, -12876)   -- Bãi 4: Candy Rebel
+    CFrame.new(-21, 80, -12352),
+    CFrame.new(582, 77, -12463),
+    CFrame.new(165, 76, -12600),
+    CFrame.new(134, 77, -12876)
 }
 local CocoaIslandAllMobs = { "Cocoa Warrior", "Chocolate Bar Battler", "Sweet Thief", "Candy Rebel" }
 local CocoaIslandSkySafeCFrame = CFrame.new(165, 310, -12550)
@@ -2365,7 +2479,6 @@ local function findBestMob(mobNames, fallbackAreaCFrame, isBossSearch)
             end
         end
 
-        -- Dự phòng: Nếu tên quái bị dịch sang ngôn ngữ khác (VD: tiếng Việt), quét mọi quái thường sống trong bán kính 280 studs quanh các bãi chờ
         if not bestMob and fallbackAreaCFrame and not isBossSearch then
             local spots = (type(fallbackAreaCFrame) == "table" and fallbackAreaCFrame.Position == nil) and fallbackAreaCFrame or { fallbackAreaCFrame }
             for _, mob in ipairs(enemies:GetChildren()) do
@@ -2391,8 +2504,6 @@ local function findBestMob(mobNames, fallbackAreaCFrame, isBossSearch)
         return bestMob, bestRoot, true
     end
 
-    -- Đối với Boss (isBossSearch == true): luôn lấy từ ReplicatedStorage để bay vào cổng gương / bãi Boss!
-    -- Đối với quái thường: chỉ lấy tọa độ định hướng từ ReplicatedStorage khi nhân vật còn ở xa (> 180 studs) VÀ không có tọa độ bãi chờ fallbackAreaCFrame!
     for _, obj in ipairs(ReplicatedStorage:GetChildren()) do
         if obj:IsA("Model") and isMobMatchingList(obj.Name, mobNames) then
             local alive, mRoot = isMobAlive(obj)
@@ -2452,7 +2563,6 @@ local function engageMobGroup(mobNames, waitCFrame, weaponOverride, statusPrefix
             local root = getCharacterRoot()
             local distToSpawn = root and (root.Position - targetFlightCF.Position).Magnitude or 9999
 
-            -- Chỉ tính thời gian trống bãi và chỉ đổi điểm tuần tra SAU KHI đã bay tới bãi (<= 30 studs)!
             if distToSpawn <= 30 then
                 if not State.ArrivedAtSpawnClock then
                     State.ArrivedAtSpawnClock = os.clock()
@@ -2470,7 +2580,6 @@ local function engageMobGroup(mobNames, waitCFrame, weaponOverride, statusPrefix
                     return
                 end
             else
-                -- Đang trên đường bay tới đảo -> giữ mới bộ đếm để không tự Hop khi đang bay xa
                 State.ArrivedAtSpawnClock = nil
                 State.LastMobSeenClock = os.clock()
             end
@@ -2486,15 +2595,12 @@ local function engageMobGroup(mobNames, waitCFrame, weaponOverride, statusPrefix
         end
     end
 
-    -- Đối với Boss: cập nhật vị trí thực tế của Boss ở MỌI KHUNG HÌNH (0 độ trễ)!
-    -- Đối với quái thường: cập nhật khi lệch > 16 studs để giữ cố định mỏ neo gom quái
     local fightingBoss = isBossMob(locked)
     if lRoot and (fightingBoss or not State.PosMon or State.PosMonGroupKey ~= groupKey or (lRoot.Position - State.PosMon.Position).Magnitude > 16) then
         State.PosMon = toFlatCFrame(lRoot.CFrame, 0)
         State.PosMonGroupKey = groupKey
     end
 
-    -- Tự động làm mới trang bị vũ khí (Re-Equip) nếu sau khi hồi sinh đứng cạnh quái/Boss > 3.5s mà máu mục tiêu chưa giảm (chống kẹt CombatFramework sau khi chết!)
     if lHum and lRoot then
         local root = getCharacterRoot()
         if root and (root.Position - lRoot.Position).Magnitude <= 65 then
@@ -2508,6 +2614,7 @@ local function engageMobGroup(mobNames, waitCFrame, weaponOverride, statusPrefix
                 if hum then
                     pcall(function() hum:UnequipTools() end)
                     task.wait(0.05)
+                    if not State.Running then return end
                     equipWeapon(weaponOverride)
                 end
             end
@@ -2522,13 +2629,13 @@ local function engageMobGroup(mobNames, waitCFrame, weaponOverride, statusPrefix
         moveToTarget(toFlatCFrame(State.PosMon, Config.FarmDistance))
         local root = getCharacterRoot()
         if root and lRoot and (root.Position - lRoot.Position).Magnitude <= 85 and Config.FastAttack then
-            pcall(executeFastAttack)
+            Util.safeCall("executeFastAttack", executeFastAttack)
         end
     end
 end
 
 local function executeLevelFarmStep(weaponOverride, customBanner)
-    if updateDashboardUI then pcall(updateDashboardUI) end
+    if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
     local root, hum = getCharacterRoot()
     if not root or not hum then return end
 
@@ -2544,6 +2651,7 @@ local function executeLevelFarmStep(weaponOverride, customBanner)
         State.QuestGuiWasVisible = false
         pcall(function() CommF_:InvokeServer("AbandonQuest") end)
         task.wait(0.3)
+        if not State.Running then return end
         return
     end
 
@@ -2557,15 +2665,12 @@ local function executeLevelFarmStep(weaponOverride, customBanner)
 
         moveToTarget(qInfo.QPos)
 
-        -- Chỉ nhận nhiệm vụ khi đã bay đến gần NPC (<= 20 studs), KHÔNG dịch chuyển tức thời
         if (root.Position - qInfo.QPos.Position).Magnitude <= 20 then
-            pcall(function()
+            Util.safeCall("executeLevelFarmStep:L2794", function()
                 CommF_:InvokeServer("StartQuest", qInfo.QName, qInfo.QId)
             end)
             State.LastAcceptedQuestName = qInfo.QName
             State.LastAcceptedQuestId = qInfo.QId
-            -- Kích hoạt khóa nhiệm vụ thông minh (38s): Ngay sau khi bấm nhận nhiệm vụ tại NPC,
-            -- nhân vật LẬP TỨC chuyển sang bay tới bãi quái (MPos) để đánh, tuyệt đối không bao giờ đứng kẹt lại ở NPC!
             State.QuestLatchUntilClock = os.clock() + 38.0
             State.SpawnPointIndex = 1
             State.ArrivedAtSpawnClock = nil
@@ -2579,9 +2684,6 @@ local function executeLevelFarmStep(weaponOverride, customBanner)
     engageMobGroup(targetMons, qInfo.MPos, weaponOverride or Config.SelectWeapon, banner, false)
 end
 
--- ============================================================================
--- 8. XỬ LÝ MỞ KHÓA VÕ V2 & CHU TRÌNH AUTO GODHUMAN
--- ============================================================================
 local function findCurrentOwnedStyleEntry()
     local fallbackEntry, fallbackTool = nil, nil
     for _, entry in ipairs(FightingStylePipeline) do
@@ -2626,7 +2728,7 @@ local function tryBuyAndCheckStyle(styleEntry)
 
     for _ = 1, 5 do
         task.wait(0.2)
-        -- 1. Kiểm tra khớp đúng tên tiếng Anh / tiếng Việt của môn võ vừa trang bị
+        if not State.Running then return false end
         local afterBuy = findStyleToolInPlayer(styleEntry)
         if afterBuy then
             local lvl = (afterBuy:FindFirstChild("Level") and tonumber(afterBuy.Level.Value)) or 400
@@ -2634,8 +2736,6 @@ local function tryBuyAndCheckStyle(styleEntry)
             return true
         end
 
-        -- 2. Nếu tên võ bị dịch sang ngôn ngữ khác, CHỈ đọc Mastery khi công cụ Cận Chiến trong Balo ĐÃ ĐỔI khác với công cụ trước đó (prevMelee)
-        -- (Tránh đọc nhầm Level 400 của võ cũ trước khi võ mới kịp tải về Balo!)
         local currentMelee = findAnyMeleeToolInPlayer()
         if currentMelee and ((not prevMelee) or currentMelee ~= prevMelee or (prevMeleeName and currentMelee.Name ~= prevMeleeName)) then
             local lvl = (currentMelee:FindFirstChild("Level") and tonumber(currentMelee.Level.Value)) or 400
@@ -2644,7 +2744,6 @@ local function tryBuyAndCheckStyle(styleEntry)
         end
     end
 
-    -- 3. Sau khi đã chờ đủ 1.0s, nếu máy chủ xác nhận buyResponse == 1 (đã sở hữu & trang bị)
     if buyResponse == 1 or buyResponse == true then
         local currentMelee = findStyleToolInPlayer(styleEntry) or findAnyMeleeToolInPlayer()
         local lvl = (currentMelee and currentMelee:FindFirstChild("Level") and tonumber(currentMelee.Level.Value)) or 400
@@ -2655,13 +2754,12 @@ local function tryBuyAndCheckStyle(styleEntry)
     return false
 end
 
--- Hàm độc lập #2: Tự động triệu hồi Katakuri (Cake Prince / Dough King) qua CakePrinceSpawner
 local function trySummonKataPortal(intervalSec)
     if CurrentSea ~= 3 then return end
     local cooldown = intervalSec or 2.0
     if (os.clock() - (State.LastCakeSpawnerClock or 0)) >= cooldown then
         State.LastCakeSpawnerClock = os.clock()
-        pcall(function()
+        Util.safeCall("trySummonKataPortal:L2897", function()
             local r1 = CommF_:InvokeServer("CakePrinceSpawner", true)
             local r2 = CommF_:InvokeServer("CakePrinceSpawner")
             local msg = tostring(r1 or r2 or "")
@@ -2673,8 +2771,6 @@ local function trySummonKataPortal(intervalSec)
     end
 end
 
--- Hàm hỗ trợ: Kiểm tra Boss Katakuri (Cake Prince / Dough King / Hoàng Tử Bột)
--- Tự động bay qua Cổng Gương (workspace.Map.CakeLoaf.BigMirror.Other) cả khi mới mở cổng LẪN SAU KHI CHẾT HỒI SINH (kể cả khi Boss vẫn còn lưu trong workspace.Enemies)!
 local function enterMirrorOrFightKataBoss(weaponToUse, bannerText)
     local cakeBoss, bossRoot, bossInWorkspace = findBestMob(CakeIslandBosses, nil, true)
     if not cakeBoss or not bossRoot then
@@ -2684,18 +2780,15 @@ local function enterMirrorOrFightKataBoss(weaponToUse, bannerText)
     local root = getCharacterRoot()
     local distToBoss = root and (root.Position - bossRoot.Position).Magnitude or 9999
 
-    -- Nếu vừa chết hồi sinh (NeedsMirrorPortalEntry) hoặc đang ở ngoài đảo chính cách xa phòng gương (> 420 studs) hoặc Boss chưa tải vào workspace:
-    -- Bắt buộc phải bay chạm vào Cổng Gương (BigMirror.Other) để Server đưa vào trong chiều không gian gương (nếu bay thẳng xuyên tường sẽ bị lỗi đứng nhìn không gây sát thương!)
     if not bossInWorkspace or State.NeedsMirrorPortalEntry or distToBoss > 420 then
         local mirrorPortal = nil
-        pcall(function()
+        Util.safeCall("enterMirrorOrFightKataBoss:L2924", function()
             mirrorPortal = workspace.Map.CakeLoaf.BigMirror.Other
         end)
         if mirrorPortal and mirrorPortal:IsA("BasePart") then
             local distToPortal = root and (root.Position - mirrorPortal.Position).Magnitude or 9999
             if distToPortal <= 20 then
-                -- Kích hoạt chạm Cổng Gương (firetouchinterest + giữ vị trí chạm 0.4s để Server đưa vào phòng Boss chắc chắn 100%)
-                pcall(function()
+                Util.safeCall("enterMirrorOrFightKataBoss:L2931", function()
                     if firetouchinterest and root then
                         firetouchinterest(root, mirrorPortal, 0)
                         firetouchinterest(root, mirrorPortal, 1)
@@ -2737,22 +2830,18 @@ local function enterMirrorOrFightKataBoss(weaponToUse, bannerText)
     return true
 end
 
--- Hàm chuyên biệt: Cày Mastery tại Đảo Bánh Sea 3 (KHÔNG nhận nhiệm vụ, CHỈ đánh quái Đảo Bánh & triệu hồi/đánh Boss Cake Prince)
 local function farmCakeIslandMastery(styleEntry, currentMas)
     if CurrentSea ~= 3 then
         travelToSea(3)
         return
     end
 
-    -- 1. Tự động triệu hồi Boss Cake Prince mỗi 3.5 giây (khi đủ 500 quái sẽ tự mở cổng)
     trySummonKataPortal(3.5)
 
-    -- 2. Nếu Boss Cake Prince hoặc Dough King xuất hiện -> Bay vào Cổng Gương / đánh Boss ngay lập tức
     if enterMirrorOrFightKataBoss(styleEntry.ToolName, string.format("👑 Săn Boss Đảo Bánh [%s: %d/%d]", styleEntry.ToolName, currentMas, styleEntry.TargetMastery)) then
         return
     end
 
-    -- 3. KHÔNG nhận nhiệm vụ -> Bay thẳng tới 4 cụm bãi quái Đảo Bánh, gom quái và đánh liên tục
     engageMobGroup(
         CakeIslandAllMobs,
         CakeIslandSpawnHubs,
@@ -2776,7 +2865,7 @@ local function handleSpecialStyleUnlock(styleEntry)
             pcall(function() CommF_:InvokeServer("BuyDeathStep") end)
             return
         end
-        local boss = findBestMob({ "Awakened Ice Admiral" })
+        local boss = findBestMob({ "Awakened Ice Admiral" }, nil, true)
         if boss then
             engageMobGroup({ "Awakened Ice Admiral" }, CFrame.new(5668, 28, -6484), "Melee", "🔑 Săn Awakened Ice Admiral", true)
         else
@@ -2794,7 +2883,7 @@ local function handleSpecialStyleUnlock(styleEntry)
             pcall(function() CommF_:InvokeServer("BuySharkmanKarate") end)
             return
         end
-        local boss = findBestMob({ "Tide Keeper" })
+        local boss = findBestMob({ "Tide Keeper" }, nil, true)
         if boss then
             engageMobGroup({ "Tide Keeper" }, CFrame.new(-3570, 123, -11555), "Melee", "🔑 Săn Tide Keeper", true)
         else
@@ -2803,15 +2892,29 @@ local function handleSpecialStyleUnlock(styleEntry)
 
     elseif uType == "ElectricClawHero" then
         if CurrentSea ~= 3 then travelToSea(3); return end
-        if updateStatusUI then
-            updateStatusUI("⚡ Đang bay làm nhiệm vụ Previous Hero mở Electric Claw...", Color3.fromRGB(130, 210, 255))
-        end
         local root = getCharacterRoot()
         local heroCF = CFrame.new(-10371, 330, -10131)
         local mansionCF = CFrame.new(-12550, 337, -7480)
+        if State.ElectricClawRunningToMansion and (os.clock() - (State.ElectricClawQuestStartClock or 0)) < 28 then
+            if updateStatusUI then
+                updateStatusUI("⚡ Đang bay tới Mansion hoàn thành nhiệm vụ Electric Claw...", Color3.fromRGB(130, 210, 255))
+            end
+            moveToTarget(mansionCF)
+            if root and (root.Position - mansionCF.Position).Magnitude <= 25 then
+                State.ElectricClawRunningToMansion = false
+                pcall(function() CommF_:InvokeServer("BuyElectricClaw") end)
+            end
+            return
+        end
+        State.ElectricClawRunningToMansion = false
+        if updateStatusUI then
+            updateStatusUI("⚡ Đang bay làm nhiệm vụ Previous Hero mở Electric Claw...", Color3.fromRGB(130, 210, 255))
+        end
         moveToTarget(heroCF)
         if root and (root.Position - heroCF.Position).Magnitude <= 20 then
             pcall(function() CommF_:InvokeServer("BuyElectricClaw", "Start") end)
+            State.ElectricClawRunningToMansion = true
+            State.ElectricClawQuestStartClock = os.clock()
             moveToTarget(mansionCF)
             pcall(function() CommF_:InvokeServer("BuyElectricClaw") end)
         end
@@ -2820,16 +2923,13 @@ local function handleSpecialStyleUnlock(styleEntry)
         if CurrentSea ~= 3 then travelToSea(3); return end
         refreshInventoryCounts()
 
-        -- 1. LUÔN LUÔN gọi Random Xương (Death King: CommF_:InvokeServer("Bones", "Buy", 1, 1)) mỗi 1.0 giây
-        -- KHÔNG phụ thuộc vào biến đếm Bones trong kho đồ (tránh lỗi không đọc được số lượng Xương làm không chịu Random!)
         if (os.clock() - (State.LastBonesRollClock or 0)) >= 1.0 then
             State.LastBonesRollClock = os.clock()
-            pcall(function()
+            Util.safeCall("handleSpecialStyleUnlock:L3060", function()
                 CommF_:InvokeServer("Bones", "Buy", 1, 1)
             end)
         end
 
-        -- 2. Nếu có Fire Essence (Tinh Hoa Lửa) HOẶC định kỳ mỗi 2.0s sau khi Random Xương -> Tự động nộp cho Uzoth & học Dragon Talon ngay!
         if State.InventoryCounts["Fire Essence"] > 0 or (os.clock() - (State.LastUzothCheckClock or 0)) >= 2.0 then
             State.LastUzothCheckClock = os.clock()
             if State.InventoryCounts["Fire Essence"] > 0 and updateStatusUI then
@@ -2846,12 +2946,11 @@ local function handleSpecialStyleUnlock(styleEntry)
             end
         end
 
-        -- 3. Tuần tra & đánh cả 4 bãi quái Lâu Đài Bóng Đêm (Haunted Castle) để cày Xương liên tục
         local hauntedHubs = {
-            CFrame.new(-9505, 172, 6158), -- Demonic Soul
-            CFrame.new(-8763, 165, 6159), -- Reborn Skeleton
-            CFrame.new(-10144, 138, 5838),-- Living Zombie
-            CFrame.new(-9582, 6, 6205)    -- Posessed Mummy
+            CFrame.new(-9505, 172, 6158),
+            CFrame.new(-8763, 165, 6159),
+            CFrame.new(-10144, 138, 5838),
+            CFrame.new(-9582, 6, 6205)
         }
         engageMobGroup(
             { "Reborn Skeleton", "Living Zombie", "Demonic Soul", "Posessed Mummy" },
@@ -2866,7 +2965,7 @@ end
 local function executeGodhumanStep()
     updateMasteryFromEquipped()
     refreshInventoryCounts()
-    if updateDashboardUI then pcall(updateDashboardUI) end
+    if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
 
     if State.HasGodhuman then
         if Config.AutoFarmLevel then
@@ -2881,16 +2980,10 @@ local function executeGodhumanStep()
         return
     end
 
-    -- Thứ tự ưu tiên kiểm tra các võ ĐANG CÓ (Kiểm tra Võ V2 trước — đặc biệt Dragon Talon V2 đầu tiên — để cày hết các võ đã mở khóa trước!)
-    local PriorityCheckIndices = { 9, 8, 7, 6, 5, 4, 3, 2, 1 } -- 9=Dragon Talon, 8=Electric Claw, 7=Sharkman Karate, 6=Death Step, 5=Superhuman, 4..1=V1
+    local PriorityCheckIndices = { 9, 8, 7, 6, 5, 4, 3, 2, 1 }
     State.LastUnownedStyleCheck = State.LastUnownedStyleCheck or {}
     State.OwnedStyles = State.OwnedStyles or {}
 
-    -- ========================================================================
-    -- GIAI ĐOẠN 1: KIỂM TRA TOÀN BỘ CÁC VÕ ĐANG CÓ & ƯU TIÊN CÀY ĐỦ 400 MASTERY
-    -- (Nếu bất kỳ môn võ nào — như Dragon Talon V2 — đã có sẵn mà chưa đủ 400 Mastery,
-    --  script sẽ trang bị và cày môn võ đó trước, KHÔNG đi làm nhiệm vụ mở khóa võ khác!)
-    -- ========================================================================
     local heldEntry = findCurrentOwnedStyleEntry()
     if heldEntry then
         local heldMas = getCachedMastery(heldEntry) or 0
@@ -2908,7 +3001,6 @@ local function executeGodhumanStep()
                 local lastFailClock = State.LastUnownedStyleCheck[styleEntry.ToolName]
                 local ownedAndEquipped = false
 
-                -- Nếu môn võ này đã biết là đang sở hữu, hoặc chưa kiểm tra trong 8s gần nhất -> Gọi kiểm tra trang bị
                 if State.OwnedStyles[styleEntry.ToolName] or not lastFailClock or (os.clock() - lastFailClock) >= 8.0 then
                     ownedAndEquipped = tryBuyAndCheckStyle(styleEntry)
                     if not ownedAndEquipped then
@@ -2926,16 +3018,12 @@ local function executeGodhumanStep()
                         return
                     end
                 elseif not styleEntry.UnlockQuest then
-                    -- Đối với các võ V1 cơ bản nếu chưa mua được thì ghi nhận để không kẹt
                     State.MasteryCache[styleEntry.ToolName] = 400
                 end
             end
         end
     end
 
-    -- ========================================================================
-    -- GIAI ĐOẠN 2: MỞ KHÓA CÁC MÔN VÕ V2 CÒN THIẾU (CHỈ KHI MỌI VÕ ĐANG CÓ ĐÃ ĐẠT 400 MASTERY)
-    -- ========================================================================
     for _, styleEntry in ipairs(FightingStylePipeline) do
         local cachedMas = getCachedMastery(styleEntry)
         if (not cachedMas or cachedMas < styleEntry.TargetMastery) and styleEntry.UnlockQuest then
@@ -2944,17 +3032,11 @@ local function executeGodhumanStep()
         end
     end
 
-    -- ========================================================================
-    -- GIAI ĐOẠN 3: FARM NGUYÊN LIỆU THEO ĐÚNG TRÌNH TỰ:
-    -- 1. Fish Tail (Về Sea 1 farm đủ 20/20) -> 2. Hop lên Sea 3 farm Dragon Scale (10/10)
-    -- -> 3. Magma Ore (20/20) & Mystic Droplet (10/10) -> 4. Lên Sea 3 mua Godhuman!
-    -- ========================================================================
     for _, mat in ipairs(RequiredMaterials) do
         local count = State.InventoryCounts[mat.Name] or 0
         if count < mat.Required then
             local matConfig = MaterialSpots[mat.Name]
             if matConfig then
-                -- Nếu nguyên liệu yêu cầu Sea cụ thể (VD: Fish Tail bắt buộc về Sea 1, Dragon Scale lên Sea 3)
                 local targetSea = matConfig.PreferredSea
                 local spotInCurrentSea = matConfig.SpotsBySea[CurrentSea]
 
@@ -2966,17 +3048,17 @@ local function executeGodhumanStep()
                     return
                 end
 
-                -- Nếu khu vực nguyên liệu cần qua cổng dịch chuyển nội bộ (Underwater City, Cursed Ship, Upper Skylands)
                 if spotInCurrentSea.EntranceVec then
                     local root = getCharacterRoot()
                     local minEntranceDist = spotInCurrentSea.EntranceDist or 3000
                     if root and (root.Position - spotInCurrentSea.EntranceVec).Magnitude > minEntranceDist then
                         if (os.clock() - (State.LastEntranceRequestClock or 0)) >= 1.2 then
                             State.LastEntranceRequestClock = os.clock()
-                            pcall(function()
+                            Util.safeCall("executeGodhumanStep:L3209", function()
                                 CommF_:InvokeServer("requestEntrance", spotInCurrentSea.EntranceVec)
                             end)
                             task.wait(0.25)
+                            if not State.Running then return end
                         end
                     end
                 end
@@ -3002,7 +3084,7 @@ local function executeGodhumanStep()
         updateStatusUI("⚡ Đang bay tới Ancient Monk mua GODHUMAN!", Color3.fromRGB(255, 220, 80))
     end
     moveToTarget(CFrame.new(-13774, 331, -9915))
-    pcall(function()
+    Util.safeCall("executeGodhumanStep:L3239", function()
         local res = CommF_:InvokeServer("BuyGodhuman", true)
         CommF_:InvokeServer("BuyGodhuman")
         if res == 1 then
@@ -3013,7 +3095,7 @@ end
 
 local function executeSingleMaterialStep()
     refreshInventoryCounts()
-    if updateDashboardUI then pcall(updateDashboardUI) end
+    if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
 
     local matName = Config.SelectedMaterial
     local matConfig = MaterialSpots[matName]
@@ -3030,57 +3112,37 @@ local function executeSingleMaterialStep()
         return
     end
 
-    -- 1. Tự động vào cổng (requestEntrance) đối với các khu vực biệt lập:
-    --    + Underwater City (Sea 1 - Fish Tail)
-    --    + Cursed Ship (Sea 2 - Ectoplasm)
-    --    + Upper Skylands (Sea 1 - Angel Wings)
     if spot.EntranceVec then
         local root = getCharacterRoot()
         local minEntranceDist = spot.EntranceDist or 3000
         if root and (root.Position - spot.EntranceVec).Magnitude > minEntranceDist then
             if (os.clock() - (State.LastEntranceRequestClock or 0)) >= 1.2 then
                 State.LastEntranceRequestClock = os.clock()
-                pcall(function()
+                Util.safeCall("executeSingleMaterialStep:L3277", function()
                     CommF_:InvokeServer("requestEntrance", spot.EntranceVec)
                 end)
                 task.wait(0.25)
+                if not State.Running then return end
             end
         end
     end
 
-    -- 2. Nếu farm Bones (Xương) và bật AutoRandomBones -> Tự động Random Xương tại Death King mỗi 1.0s
     if matName == "Bones" and Config.AutoRandomBones and (os.clock() - (State.LastBonesRollClock or 0)) >= 1.0 then
         State.LastBonesRollClock = os.clock()
-        pcall(function()
+        Util.safeCall("executeSingleMaterialStep:L3289", function()
             CommF_:InvokeServer("Bones", "Buy", 1, 1)
         end)
     end
 
-    -- 3. Nếu farm Mirror Fractal / Đảo Bánh -> Tự triệu hồi cổng Cake Prince / Dough King và ưu tiên đánh Boss
     local have = State.InventoryCounts[matName] or 0
     local vnDesc = MaterialVietnameseNames[matName] or matName
     if spot.AutoCakeSpawner then
-        if (os.clock() - (State.LastCakeSpawnerClock or 0)) >= 3.5 then
-            State.LastCakeSpawnerClock = os.clock()
-            pcall(function()
-                CommF_:InvokeServer("CakePrinceSpawner", true)
-                CommF_:InvokeServer("CakePrinceSpawner")
-            end)
-        end
-        local cakeBoss, bossRoot = findBestMob(CakeIslandBosses)
-        if cakeBoss and bossRoot then
-            engageMobGroup(
-                CakeIslandBosses,
-                CFrame.new(-2077, 252, -12373),
-                Config.SelectWeapon,
-                string.format("👑 Săn Boss [%s: %d]", matName, have),
-                false
-            )
+        trySummonKataPortal(3.5)
+        if enterMirrorOrFightKataBoss(Config.SelectWeapon, string.format("👑 Săn Boss [%s: %d]", matName, have)) then
             return
         end
     end
 
-    -- 4. Bay tuần tra qua toàn bộ các bãi quái rơi nguyên liệu đang chọn, gom quái và đánh liên tục
     engageMobGroup(
         spot.Mobs,
         spot.WaitCFrame,
@@ -3090,26 +3152,21 @@ local function executeSingleMaterialStep()
     )
 end
 
--- Hàm độc lập #1: Auto Farm Cake Queen / Katakuri (Farm 500 Quái Đảo Bánh & Tự Đánh Kata / Cake Queen)
--- Tách biệt hoàn toàn với nút Tự Động Triệu Hồi Kata (Config.AutoSummonKata)!
 local function executeKataFarmStep()
-    if updateDashboardUI then pcall(updateDashboardUI) end
+    if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
     if CurrentSea ~= 3 then
         travelToSea(3)
         return
     end
 
-    -- CHỈ gọi triệu hồi CakePrinceSpawner khi người dùng BẬT nút "🔔 Tự Động Triệu Hồi Kata" (Config.AutoSummonKata == true)
     if Config.AutoSummonKata then
         trySummonKataPortal(2.0)
     end
 
-    -- 1. Ưu tiên số 1: Nếu Katakuri (Cake Prince hoặc Dough King) đang xuất hiện -> Bay vào đánh Kata ngay lập tức!
     if enterMirrorOrFightKataBoss(Config.SelectWeapon, "👑 Đang đánh Katakuri (Cake Prince / Dough King)") then
         return
     end
 
-    -- 2. Ưu tiên số 2: Nếu Boss Cake Queen (Đảo Kem - Ice Cream Island) đang xuất hiện -> Bay sang tiêu diệt Cake Queen!
     local queenBoss, queenRoot = findBestMob(CakeQueenBosses, nil, true)
     if queenBoss and queenRoot then
         engageMobGroup(
@@ -3122,7 +3179,6 @@ local function executeKataFarmStep()
         return
     end
 
-    -- 3. Khi chưa có Boss -> Tuần tra đánh 4 cụm bãi quái Đảo Bánh (Cookie Crafter, Cake Guard, Baking Staff, Head Baker) để tích đủ 500 quái!
     local summonStatus = Config.AutoSummonKata and "Auto Triệu Hồi: BẬT" or "Auto Triệu Hồi: TẮT"
     local remSuffix = State.KataRemainingMobs and (" | Còn: " .. tostring(State.KataRemainingMobs)) or ""
     engageMobGroup(
@@ -3134,17 +3190,8 @@ local function executeKataFarmStep()
     )
 end
 
--- Hàm chuyên biệt: Auto Train Tộc V4 tại Đảo Cacao (Sea 3)
--- Chu trình:
---   1. Khi chưa đầy nộ (RaceEnergy < 1 và chưa bật RaceTransformed): Bay xuống đánh 4 bãi quái Đảo Cacao để tích nộ.
---   2. Khi tích đủ nộ (RaceEnergy >= 1) hoặc đang trong trạng thái biến hình Tộc V4 (RaceTransformed == true):
---      + Tự động kích hoạt Tộc V4 (Awakening / Thức Tỉnh) & Tộc V3
---      + Ngắt khóa quái (LockedMob = nil, PosMon = nil, IsHoveringV4Sky = true)
---      + Bay thẳng lên bầu trời phía trên Đảo Cacao (Y = 310) đứng treo an toàn chờ hết thanh nộ V4!
---   3. Ngay khi hết nộ (RaceTransformed == false và RaceEnergy < 1):
---      + Hạ IsHoveringV4Sky = false -> Tự động bay xuống Đảo Cacao đánh quái tích nộ tiếp!
 local function executeTrainRaceV4Step()
-    if updateDashboardUI then pcall(updateDashboardUI) end
+    if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
     if CurrentSea ~= 3 then
         State.IsHoveringV4Sky = false
         travelToSea(3)
@@ -3161,25 +3208,21 @@ local function executeTrainRaceV4Step()
     local energyVal = (raceEnergy and tonumber(raceEnergy.Value)) or 0
     local isEnergyFull = (energyVal >= 1)
 
-    -- Định kỳ tự mua nâng cấp Train Tộc (UpgradeRace) nếu đã đủ điều kiện
     if (os.clock() - (State.LastUpgradeRaceClock or 0)) >= 6.0 then
         State.LastUpgradeRaceClock = os.clock()
-        pcall(function()
+        Util.safeCall("executeTrainRaceV4Step:L3402", function()
             CommF_:InvokeServer("UpgradeRace", "Buy")
         end)
     end
 
-    -- GIAI ĐOẠN A: ĐÃ TÍCH ĐỦ NỘ (energyVal >= 1) HOẶC ĐANG TRONG TRẠNG THÁI BẬT TỘC V4 (isTransformed == true)
-    -- -> Bật Tộc V4 ngay lập tức và bay lên cao trên bầu trời Đảo Cacao (Y = 310) chờ đến khi hết nộ!
     if isTransformed or isEnergyFull then
         State.IsHoveringV4Sky = true
         State.LockedMob = nil
         State.PosMon = nil
 
-        -- Nếu đủ nộ mà chưa biến hình -> Kích hoạt Tộc V4 (Awakening / Thức Tỉnh) ngay!
         if not isTransformed then
-            pcall(executeRaceAbilities)
-            pcall(function()
+            Util.safeCall("executeRaceAbilities", executeRaceAbilities)
+            Util.safeCall("executeTrainRaceV4Step:L3417", function()
                 local commE = Remotes:FindFirstChild("CommE") or (ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("CommE"))
                 if commE then commE:FireServer("ActivateAbility") end
             end)
@@ -3205,8 +3248,6 @@ local function executeTrainRaceV4Step()
         return
     end
 
-    -- GIAI ĐOẠN B: ĐÃ HẾT NỘ (isTransformed == false và energyVal < 1)
-    -- -> Tự động hạ xuống Đảo Cacao đánh 4 bãi quái (Cocoa Warrior, Chocolate Bar Battler, Sweet Thief, Candy Rebel) để tích nộ tiếp!
     State.IsHoveringV4Sky = false
     local pct = math.floor(math.max(0, math.min(1, energyVal)) * 100)
     engageMobGroup(
@@ -3218,11 +3259,6 @@ local function executeTrainRaceV4Step()
     )
 end
 
--- ============================================================================
--- TÍNH NĂNG MỚI: TỰ ĐỘNG BAY TỚI CHỖ MUA GEAR (TEMPLE OF TIME / ANCIENT CLOCK)
--- & TỰ ĐỘNG HOÀN THÀNH TRIAL TỘC V4 (ĐỦ 6 TỘC: MINK, ANGEL, CYBORG, HUMAN, GHOUL, SHARK)
--- ============================================================================
--- Tọa độ chuẩn của NPC trên đỉnh Đảo Great Tree (Misc. / Mysterious Force) & NPC Mua Gear (Ancient One) trong Trial Temple
 local GreatTreeTopNpcCFrame   = CFrame.new(2860.95, 2280.42, -7218.52)
 local TempleOfTimeEntranceVec = Vector3.new(28286.35546875, 14895.3017578125, 102.62469482421875)
 local AncientOneCFrame        = CFrame.new(28973.08, 14891.80, -120.29)
@@ -3246,7 +3282,6 @@ local function getPlayerRaceName()
     return r
 end
 
--- Lấy CFrame chuẩn xác của bất kỳ Model/NPC nào (hỗ trợ cả NPC vô hình như "Misc." / "Mysterious Force" và quả cầu "Ancient One")
 local function getObjectCFrame(obj)
     if not obj then return nil end
     if obj:IsA("BasePart") then
@@ -3272,7 +3307,6 @@ local function getObjectCFrame(obj)
     return nil
 end
 
--- Hàm kích hoạt nút bấm UI hộp thoại (TUYỆT ĐỐI KHÔNG gửi phím E hay phím bàn phím để tránh bật nhầm Haki Quan Sát!)
 local function triggerGuiButton(btn)
     if not btn then return end
     pcall(function()
@@ -3297,10 +3331,6 @@ local function triggerGuiButton(btn)
     end)
 end
 
--- Hàm tương tác NPC chuẩn Blox Fruits (TUYỆT ĐỐI KHÔNG nhấn phím E vì phím E trong Blox Fruits là bật Haki Quan Sát!):
--- 1. Đưa nhân vật áp sát NPC (<= 3 studs).
--- 2. Kích hoạt ProximityPrompt, ClickDetector, TouchTransmitter trên NPC & vùng lân cận (<= 30 studs).
--- 3. Tự động bấm nút Option1 ("Use it" / "Dùng nó" / "Talk") trên bảng PlayerGui.Main.Dialogue nếu mở lên.
 local function interactWithNpcOrObject(obj, targetCF)
     pcall(function()
         local root = getCharacterRoot()
@@ -3328,7 +3358,6 @@ local function interactWithNpcOrObject(obj, targetCF)
 
         triggerPromptsAndDetectors(obj)
 
-        -- Quét thêm mọi NPC trong workspace.NPCs nằm trong bán kính 30 studs quanh nhân vật
         local npcsFolder = workspace:FindFirstChild("NPCs")
         if npcsFolder and root then
             for _, nearNpc in ipairs(npcsFolder:GetChildren()) do
@@ -3339,7 +3368,6 @@ local function interactWithNpcOrObject(obj, targetCF)
             end
         end
 
-        -- Giả lập Click chuột (VirtualUser) để kích hoạt nút "Tương tác" (?) khi đứng tại vòng tròn NPC
         if VirtualUser then
             pcall(function()
                 VirtualUser:CaptureController()
@@ -3347,7 +3375,6 @@ local function interactWithNpcOrObject(obj, targetCF)
             end)
         end
 
-        -- Tự động nhấn nút "Tương tác" / "Interact" trên màn hình (như ở giây 00:20 trong video) và nút Option1 trên hộp thoại Dialogue
         local pGui = LocalPlayer:FindFirstChild("PlayerGui")
         if pGui then
             local mainGui = pGui:FindFirstChild("Main")
@@ -3374,13 +3401,11 @@ local function interactWithNpcOrObject(obj, targetCF)
     end)
 end
 
--- Hàm tìm tọa độ thực tế của NPC trên đỉnh Đảo Great Tree ("Misc." / "Mysterious Force") để vào Trial Temple
 local function findGreatTreeNpcTarget()
     local foundCF, foundObj = nil, nil
-    pcall(function()
+    Util.safeCall("findGreatTreeNpcTarget:L3615", function()
         for _, folder in ipairs({ workspace:FindFirstChild("NPCs"), ReplicatedStorage:FindFirstChild("NPCs") }) do
             if folder then
-                -- Ưu tiên 1: Tìm theo tên NPC ("Misc.", "Mysterious Force", "Temple of Time") ở độ cao đỉnh cây Great Tree (1400 <= Y < 10000)
                 for _, npc in ipairs(folder:GetChildren()) do
                     local nLower = string.lower(tostring(npc.Name or ""))
                     if nLower == "misc." or nLower == "misc"
@@ -3398,7 +3423,6 @@ local function findGreatTreeNpcTarget()
                         end
                     end
                 end
-                -- Ưu tiên 2: Nếu tên bị đổi, lấy bất kỳ NPC nào nằm trên đỉnh cây Great Tree (1850 <= Y <= 5000)
                 if not foundCF then
                     for _, npc in ipairs(folder:GetChildren()) do
                         local nCF = getObjectCFrame(npc)
@@ -3416,14 +3440,12 @@ local function findGreatTreeNpcTarget()
     return foundCF or GreatTreeTopNpcCFrame, foundObj
 end
 
--- Hàm tìm tọa độ thực tế của NPC Mua Gear (Ancient One / Red Orb / "KHÁC") bên trong Trial Temple
 local function findGearNpcTarget()
     local gearNpcCF, gearNpcObj = AncientOneCFrame, nil
 
-    pcall(function()
+    Util.safeCall("findGearNpcTarget:L3658", function()
         for _, folder in ipairs({ workspace:FindFirstChild("NPCs"), ReplicatedStorage:FindFirstChild("NPCs") }) do
             if folder then
-                -- Ưu tiên 1: Tìm theo tên ("Ancient One", "Red Orb", "Người Xưa", hoặc "KHÁC" / "Misc." nằm gần tọa độ cầu thang 28973, 14890, -120)
                 for _, npc in ipairs(folder:GetChildren()) do
                     local nLower = string.lower(tostring(npc.Name or ""))
                     local nCF = getObjectCFrame(npc)
@@ -3462,30 +3484,20 @@ local function findGearNpcTarget()
     return gearNpcCF, gearNpcObj
 end
 
--- Quy trình chuẩn 2 bước để vào Trial Temple (Temple of Time) từ bên ngoài:
--- Bước 1: Bay lên đỉnh Đảo Great Tree tới chỗ NPC ("Misc." / "Mysterious Force").
--- Bước 2: Khi đã tới sát NPC trên đỉnh Great Tree (<= 15 studs), NGƯNG GIỮ CFRAME BAY (stopTween + removeAntiFall)
---         và gọi đúng bộ Remote chuẩn của NPC Great Tree: CommF_:InvokeServer("RaceV4Progress", "Teleport") + requestEntrance!
 local function ensureInsideTempleOfTime()
     local root = getCharacterRoot()
     if not root then return false end
 
-    -- QUAN TRỌNG (Sửa lỗi đang trong Trial lại bay về Đảo Great Tree):
-    -- Toàn bộ các đảo thường ở Sea 3 đều có X < 8000 và Y < 3000 (Đảo Great Tree ở X=2860, Y=2280).
-    -- Trong khi đó, Ngôi Đền Thời Gian (Temple of Time) và TẤT CẢ các phòng Trial Tộc V4 đều nằm ở Y >= 3500 hoặc X > 10000!
-    -- Do đó, hễ nhân vật đang ở Y >= 3500 hoặc X > 10000 (hoặc đang trong phòng Trial), TUYỆT ĐỐI coi là đã ở trong khu vực Đền/Trial và KHÔNG BAO GIỜ bay ngược về Đảo Great Tree!
     if root.Position.Y >= 3500 or root.Position.X > 10000 then
         State.TeleportingToTempleUntil = nil
         return true
     end
 
-    -- Khi còn đang bay ở ngoài đảo lên đỉnh Great Tree, bật NoClip để không vướng tán cây
     State.DisableNoClip = false
 
     local treeNpcCF, treeNpcObj = findGreatTreeNpcTarget()
     local distToTreeNpc = (root.Position - treeNpcCF.Position).Magnitude
 
-    -- BƯỚC 1: Bay mượt lên đỉnh Đảo Great Tree tới chỗ NPC (chưa tới gần <= 15 studs thì tiếp tục bay, KHÔNG gọi dịch chuyển sớm)
     if distToTreeNpc > 15 then
         if updateStatusUI then
             updateStatusUI(
@@ -3497,8 +3509,6 @@ local function ensureInsideTempleOfTime()
         return false
     end
 
-    -- BƯỚC 2: Đã tới sát NPC trên đỉnh Đảo Great Tree (<= 15 studs)
-    -- Dừng giữ CFrame bay & gọi trực tiếp chuỗi Remote "RaceV4Progress" -> "Teleport" chuẩn của NPC Misc. trên đỉnh Great Tree!
     if updateStatusUI then
         updateStatusUI(
             "🌀 [Bước 2] Đã tới NPC Đảo Great Tree -> Đang tương tác NPC vào Trial Temple...",
@@ -3520,6 +3530,7 @@ local function ensureInsideTempleOfTime()
         pcall(function() CommF_:InvokeServer("RaceV4Progress", "Continue") end)
         pcall(function() CommF_:InvokeServer("requestEntrance", TempleOfTimeEntranceVec) end)
         task.wait(0.2)
+        if not State.Running then return end
     end
 
     root = getCharacterRoot()
@@ -3530,11 +3541,8 @@ local function ensureInsideTempleOfTime()
     return false
 end
 
--- 1. Hàm Tự Động Bay Tới Chỗ NPC Mua Gear:
---    Bước 1: Bay lên NPC Đảo Great Tree -> Bước 2: Tương tác NPC ("RaceV4Progress", "Teleport") vào Trial Temple
---    -> Bước 3: Chỉ bay tới chỗ NPC Mua Gear (Ancient One), GIỮ NGUYÊN NEO CHỐNG RƠI (BodyVelocity + moveToTarget) để KHÔNG BAO GIỜ rơi xuyên sàn đền!
 local function executeFlyBuyGearStep()
-    if updateDashboardUI then pcall(updateDashboardUI) end
+    if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
     if CurrentSea ~= 3 then
         travelToSea(3)
         return
@@ -3546,12 +3554,10 @@ local function executeFlyBuyGearStep()
     State.LockedMob = nil
     State.PosMon = nil
 
-    -- Bước 1 & Bước 2: Nếu chưa ở trong Trial Temple -> Bay lên NPC Đảo Great Tree rồi tương tác với NPC đó để vào Trial Temple
     if not ensureInsideTempleOfTime() then
         return
     end
 
-    -- Bước 3: Đã ở trong Trial Temple (Y >= 12000) -> Bật va chạm vật lý (Tắt xuyên tường) & bay tới chỗ NPC Mua Gear (Ancient One)
     State.DisableNoClip = true
     setCharacterCollision(true)
 
@@ -3559,12 +3565,9 @@ local function executeFlyBuyGearStep()
     if not root then return end
 
     local gearNpcCF, gearNpcObj = findGearNpcTarget()
-    -- Đảm bảo độ cao đứng tại NPC Ancient One luôn >= 14891.8 (trên mặt sàn đền) để không bị chìm chân xuống sàn
     local safeGearCF = CFrame.new(gearNpcCF.Position.X, math.max(gearNpcCF.Position.Y, 14891.8), gearNpcCF.Position.Z)
     local distToGearNpc = (root.Position - safeGearCF.Position).Magnitude
 
-    -- QUAN TRỌNG: Luôn giữ moveToTarget(safeGearCF) (kể cả khi đã tới <= 12 studs) để BodyVelocity chống rơi luôn giữ nhân vật đứng vững trên vòng tròn "Tương tác",
-    -- TUYỆT ĐỐI KHÔNG gọi removeAntiFall() hay stopTween() ở trong đền để tránh lỗi rơi xuyên sàn xuống biển chết như trong video!
     moveToTarget(safeGearCF)
 
     if distToGearNpc > 12 then
@@ -3577,7 +3580,6 @@ local function executeFlyBuyGearStep()
         return
     end
 
-    -- Đã tới sát NPC Mua Gear (Ancient One <= 12 studs) -> Giữ nguyên vị trí cố định tại vòng tròn "Tương tác", tương tác NPC & gọi UpgradeRace("Check" / "Buy")
     interactWithNpcOrObject(gearNpcObj, safeGearCF)
 
     if (os.clock() - (State.LastUpgradeRaceClock or 0)) >= 1.2 then
@@ -3594,10 +3596,6 @@ local function executeFlyBuyGearStep()
     end
 end
 
--- 2. Hàm Tự Động Hoàn Thành Trial Tộc V4 Toàn Diện (V6.4):
---    - Giai đoạn 1 (Ở ngoài đảo Sea 3): KHÔNG đánh quái ngoài đảo, bay lên NPC Đảo Great Tree -> Tương tác vào Temple of Time.
---    - Giai đoạn 2 (Ở hành lang Temple of Time, chưa vào phòng Trial): Tắt xuyên tường (CanCollide = true), bay tới Cổng Trial Tộc V4 & tự kích hoạt Tộc V3 mở cổng.
---    - Giai đoạn 3 (ĐÃ VÀO TRONG PHÒNG TRIAL): TUYỆT ĐỐI KHÔNG quay lại Đảo Great Tree hay Cổng hành lang! Tự động hoàn thành thử thách của cả 6 Tộc (Mink, Angel/Skypiea, Cyborg, Human, Ghoul, Shark/Fishman)!
 local executeAutoTrialRaceV4Step
 do
     local function isPositionInTempleHallway(pos)
@@ -3608,7 +3606,7 @@ do
 
     local function isTrialTimerVisible()
         local visible = false
-        pcall(function()
+        Util.safeCall("executeFlyBuyGearStep:L3847", function()
             local pGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:FindFirstChild("PlayerGui")
             local main = pGui and pGui:FindFirstChild("Main")
             local timer = main and main:FindFirstChild("Timer")
@@ -3624,7 +3622,7 @@ do
 
     local function findMinkTrialFinish()
         local finishPart = nil
-        pcall(function()
+        Util.safeCall("executeFlyBuyGearStep:L3863", function()
             local map = workspace:FindFirstChild("Map")
             local minkTrial = map and map:FindFirstChild("MinkTrial")
             if minkTrial then
@@ -3655,7 +3653,7 @@ do
 
     local function findSkyTrialFinish()
         local finishPart = nil
-        pcall(function()
+        Util.safeCall("executeFlyBuyGearStep:L3894", function()
             local map = workspace:FindFirstChild("Map")
             local skyTrial = map and map:FindFirstChild("SkyTrial")
             if skyTrial then
@@ -3729,7 +3727,6 @@ do
             local mRoot = mob:FindFirstChild("HumanoidRootPart")
             local mHum = mob:FindFirstChildOfClass("Humanoid")
             if mRoot and mHum and mHum.Health > 0 then
-                -- Chỉ đánh quái nằm trong khu vực Đền/Trial trên cao (Y >= 3500 hoặc X > 10000), KHÔNG BAO GIỜ đánh quái ngoài đảo Sea 3!
                 if mRoot.Position.Y >= 3500 or mRoot.Position.X > 10000 then
                     local d = (mRoot.Position - rootPos).Magnitude
                     if d <= 1800 then
@@ -3755,17 +3752,14 @@ do
         return bestMob, bestMobRoot
     end
 
-    -- Kiểm tra chính xác nhân vật ĐÃ Ở TRONG PHÒNG THỬ THÁCH TRIAL hay chưa
     local function detectActiveTrialRoom(root, raceName)
         local pos = root.Position
         local inSkyOrTempleZone = (pos.Y >= 3500 or pos.X > 10000)
 
-        -- 1. Nếu đồng hồ đếm ngược Trial (PlayerGui.Main.Timer) đang hiển thị -> Chắc chắn 100% đang trong phòng Trial!
         if isTrialTimerVisible() then
             return true
         end
 
-        -- 2. Kiểm tra đối tượng bản đồ phòng Trial theo từng Tộc
         local map = workspace:FindFirstChild("Map")
         if raceName == "Mink" then
             local finishPart = findMinkTrialFinish()
@@ -3795,8 +3789,6 @@ do
             end
         end
 
-        -- 3. Nếu nhân vật đang ở trên khu vực Đền/Trial (Y >= 3500 hoặc X > 10000) nhưng ĐÃ ĐƯỢC DỊCH CHUYỂN RA NGOÀI hành lang đền chính:
-        --    (Tức là vừa qua Cổng Trial để vào phòng thử thách riêng của Tộc!)
         if inSkyOrTempleZone and not isPositionInTempleHallway(pos) then
             return true
         end
@@ -3805,7 +3797,7 @@ do
     end
 
     executeAutoTrialRaceV4Step = function()
-        if updateDashboardUI then pcall(updateDashboardUI) end
+        if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
         if CurrentSea ~= 3 then
             travelToSea(3)
             return
@@ -3816,15 +3808,10 @@ do
 
         local raceName = getPlayerRaceName()
 
-        -- ====================================================================
-        -- GIAI ĐOẠN 3: NẾU ĐÃ Ở TRONG PHÒNG TRIAL -> TỰ ĐỘNG HOÀN THÀNH THỬ THÁCH NGAY!
-        -- (Tuyệt đối KHÔNG gọi ensureInsideTempleOfTime, KHÔNG quay về Đảo Great Tree và KHÔNG bay ngược ra Cổng hành lang!)
-        -- ====================================================================
         if detectActiveTrialRoom(root, raceName) then
             State.TeleportingToTempleUntil = nil
 
             if raceName == "Mink" then
-                -- Tộc Mink (Trial of Speed): Bật xuyên tường bay thẳng tới điểm cuối mê cung (Ceiling / FinishPart) & chạm đích!
                 State.InCombatTrialRoom = false
                 State.DisableNoClip = false
                 State.LockedMob = nil
@@ -3835,7 +3822,7 @@ do
                     local dist = (root.Position - targetCF.Position).Magnitude
                     moveToTarget(targetCF)
                     if dist <= 30 then
-                        pcall(function()
+                        Util.safeCall("executeFlyBuyGearStep:L4074", function()
                             if firetouchinterest then
                                 firetouchinterest(root, finishPart, 0)
                                 firetouchinterest(root, finishPart, 1)
@@ -3854,7 +3841,6 @@ do
                 return
 
             elseif raceName == "Skypiea" then
-                -- Tộc Angel / Skypiea (Trial of the King): Bay thẳng tới đám mây đích (SkyTrial.Model.FinishPart) & chạm đích!
                 State.InCombatTrialRoom = false
                 State.DisableNoClip = false
                 State.LockedMob = nil
@@ -3865,7 +3851,7 @@ do
                     local dist = (root.Position - targetCF.Position).Magnitude
                     moveToTarget(targetCF)
                     if dist <= 30 then
-                        pcall(function()
+                        Util.safeCall("executeFlyBuyGearStep:L4104", function()
                             if firetouchinterest then
                                 firetouchinterest(root, finishPart, 0)
                                 firetouchinterest(root, finishPart, 1)
@@ -3884,7 +3870,6 @@ do
                 return
 
             elseif raceName == "Cyborg" then
-                -- Tộc Cyborg (Trial of the Machine): Bay vọt lên độ cao an toàn trên không trung (Y >= 15150) để né 100% tên lửa & bom!
                 State.InCombatTrialRoom = false
                 State.DisableNoClip = false
                 State.LockedMob = nil
@@ -3900,7 +3885,6 @@ do
                 return
 
             elseif raceName == "Fishman" then
-                -- Tộc Shark / Fishman (Trial of Water): Tìm và tiêu diệt SeaBeast trong hồ thử thách!
                 State.InCombatTrialRoom = true
                 State.DisableNoClip = false
                 local sb, sbRoot = findTrialSeaBeast(root.Position)
@@ -3912,7 +3896,7 @@ do
                     equipWeapon(Config.SelectWeapon)
                     moveToTarget(hoverCF)
                     if (root.Position - sbPos).Magnitude <= 155 and Config.FastAttack then
-                        pcall(executeFastAttack)
+                        Util.safeCall("executeFastAttack", executeFastAttack)
                     end
                     if updateStatusUI then
                         updateStatusUI(
@@ -3929,7 +3913,6 @@ do
                 return
 
             else
-                -- Tộc Human (Trial of Strength) & Tộc Ghoul (Trial of Carnage): Gom quái & xả FastAttack tiêu diệt Boss/quái trong phòng Trial!
                 State.InCombatTrialRoom = true
                 State.DisableNoClip = false
                 State.CurrentMonFilter = nil
@@ -3940,7 +3923,7 @@ do
                     equipWeapon(Config.SelectWeapon)
                     moveToTarget(toFlatCFrame(State.PosMon, Config.FarmDistance))
                     if (root.Position - mobRoot.Position).Magnitude <= 95 and Config.FastAttack then
-                        pcall(executeFastAttack)
+                        Util.safeCall("executeFastAttack", executeFastAttack)
                     end
                     if updateStatusUI then
                         updateStatusUI(
@@ -3961,10 +3944,6 @@ do
             end
         end
 
-        -- ====================================================================
-        -- GIAI ĐOẠN 1 & 2: KHI CHƯA VÀO PHÒNG TRIAL -> TUYỆT ĐỐI KHÔNG ĐÁNH QUÁI!
-        -- Bay lên NPC Đảo Great Tree -> Vào Temple of Time -> Tắt xuyên tường & Bay tới Cổng Trial!
-        -- ====================================================================
         State.InCombatTrialRoom = false
         State.LockedMob = nil
         State.PosMon = nil
@@ -3973,7 +3952,6 @@ do
             return
         end
 
-        -- Đã ở trong hành lang Temple of Time -> Tắt khả năng xuyên tường (CanCollide = true) và bay tới Cổng Trial Tộc V4
         State.DisableNoClip = true
         setCharacterCollision(true)
 
@@ -3984,7 +3962,6 @@ do
         local doorCF = CFrame.new(rawDoorCF.Position.X, math.max(rawDoorCF.Position.Y, 14891.5), rawDoorCF.Position.Z)
         local distToDoor = (root.Position - doorCF.Position).Magnitude
 
-        -- Giữ moveToTarget(doorCF) liên tục để không bao giờ bị rơi xuyên sàn đền
         moveToTarget(doorCF)
 
         if distToDoor > 12 then
@@ -3997,10 +3974,9 @@ do
             return
         end
 
-        -- Khi đã đứng tại Cổng Trial (<= 12 studs) -> Định kỳ kích hoạt kỹ năng Tộc V3 (CommE: ActivateAbility) để tự mở cửa vào phòng Trial!
         if (os.clock() - (State.LastTrialDoorV3Clock or 0)) >= 1.5 then
             State.LastTrialDoorV3Clock = os.clock()
-            pcall(function()
+            Util.safeCall("executeFlyBuyGearStep:L4239", function()
                 local commE = Remotes:FindFirstChild("CommE")
                 if commE then
                     commE:FireServer("ActivateAbility")
@@ -4017,12 +3993,6 @@ do
     end
 end
 
--- ============================================================================
--- 8C. HỆ THỐNG SĂN LEVIATHAN TOÀN DIỆN (V6.3):
---     1. 👥 Giả Lập Đủ 5 Player Ngồi Trên Thuyền Beast Hunter (Spoof 5/5 Seats + Party Payload)
---     2. 🐉 Tự Động Tìm Đảo Leviathan (Hối lộ Spy + Mua/Lái Thuyền Ra Tầng 6 Tìm Frozen Dimension)
---     3. ⚔️ Tự Động Đánh Leviathan & Tự Đổi Sang Đuôi Khác Khi Đủ Dame (>=15% HP mỗi đuôi -> Phá hết đuôi -> Đánh Đầu Chính)
--- ============================================================================
 local executeSpoof5PlayersBoatStep, cleanupSpoofedBoatPlayers, executeAttackLeviathanStep, executeFindLeviathanStep
 do
 local TikiSpyCFrame        = CFrame.new(-16471.4, 528.3, 439.8)
@@ -4042,7 +4012,6 @@ State.LeviathanWaypointIdx      = 1
 State.FakeBoatPlayers           = State.FakeBoatPlayers or {}
 State.SpoofedSeatedCount        = 0
 
--- Hàm tìm thuyền Beast Hunter (hoặc thuyền săn biển hiện tại) trong workspace.Boats
 local function findBeastHunterBoat()
     local boatsFolder = workspace:FindFirstChild("Boats")
     if not boatsFolder then return nil end
@@ -4060,12 +4029,11 @@ local function findBeastHunterBoat()
     return bestBoat
 end
 
--- Hàm tạo danh sách 5 Player (gồm LocalPlayer + người chơi trong server + thực thể Player giả lập) để gửi kèm Remote mở cổng Frozen Dimension
 local function buildSpoofed5PlayerParty()
     local party = { LocalPlayer }
     local seen = { [LocalPlayer] = true }
 
-    pcall(function()
+    Util.safeCall("buildSpoofed5PlayerParty:L4304", function()
         for _, plr in ipairs(Players:GetPlayers()) do
             if not seen[plr] and #party < 5 then
                 seen[plr] = true
@@ -4087,7 +4055,6 @@ local function buildSpoofed5PlayerParty()
     return party
 end
 
--- 1. HÀM GIẢ LẬP ĐỦ 5 PLAYER NGỒI TRÊN THUYỀN BEAST HUNTER (Spoof 5/5 Boat Seats)
 executeSpoof5PlayersBoatStep = function()
     local boat = findBeastHunterBoat()
     if not boat then
@@ -4098,8 +4065,7 @@ executeSpoof5PlayersBoatStep = function()
     local boatCF = getObjectCFrame(boat) or CFrame.new(-16210, 26, 450)
     local seats = {}
 
-    -- Quét toàn bộ ghế ngồi (VehicleSeat & Seat) trên thuyền Beast Hunter
-    pcall(function()
+    Util.safeCall("executeSpoof5PlayersBoatStep:L4338", function()
         for _, desc in ipairs(boat:GetDescendants()) do
             if desc:IsA("VehicleSeat") or desc:IsA("Seat") or string.find(string.lower(tostring(desc.Name)), "seat", 1, true) then
                 if desc:IsA("BasePart") then
@@ -4109,7 +4075,6 @@ executeSpoof5PlayersBoatStep = function()
         end
     end)
 
-    -- Đảm bảo thuyền có tối thiểu 5 ghế ngồi (1 ghế lái VehicleSeat + 4 ghế phụ Seat) để đủ 5 vị trí
     while #seats < 5 do
         local idx = #seats + 1
         local newSeat = Instance.new(idx == 1 and "VehicleSeat" or "Seat")
@@ -4119,13 +4084,12 @@ executeSpoof5PlayersBoatStep = function()
         table.insert(seats, newSeat)
     end
 
-    -- Ghế số 1 dành cho LocalPlayer (hoặc giữ liên kết với nhân vật chính)
     local seatedCount = 1
     local char = LocalPlayer.Character
     local myHum = char and char:FindFirstChildOfClass("Humanoid")
     local myRoot = char and char:FindFirstChild("HumanoidRootPart")
     if seats[1] and myHum and myRoot then
-        pcall(function()
+        Util.safeCall("executeSpoof5PlayersBoatStep:L4364", function()
             if not seats[1]:FindFirstChild("MaidHubOwnerWeld") then
                 local w = Instance.new("Weld")
                 w.Name = "MaidHubOwnerWeld"
@@ -4136,7 +4100,6 @@ executeSpoof5PlayersBoatStep = function()
         end)
     end
 
-    -- Ghế số 2..5: Tạo 4 nhân vật giả lập (Clone Rig có Humanoid + HumanoidRootPart + SeatWeld) ngồi cố định trên 4 ghế phụ của thuyền Beast Hunter!
     local charsFolder = workspace:FindFirstChild("Characters") or workspace
     for i = 2, 5 do
         local seat = seats[i]
@@ -4179,7 +4142,7 @@ executeSpoof5PlayersBoatStep = function()
             if fRoot and fHum then
                 fRoot.CFrame = seat.CFrame
                 fHum.Sit = true
-                pcall(function()
+                Util.safeCall("executeSpoof5PlayersBoatStep:L4418", function()
                     if seat.Sit then
                         seat:Sit(fHum)
                     end
@@ -4199,7 +4162,7 @@ executeSpoof5PlayersBoatStep = function()
     end
 
     State.SpoofedSeatedCount = seatedCount
-    pcall(function()
+    Util.safeCall("executeSpoof5PlayersBoatStep:L4438", function()
         local psVal = boat:FindFirstChild("PlayersSeated")
         if not psVal then
             psVal = Instance.new("IntValue")
@@ -4219,7 +4182,7 @@ end
 
 cleanupSpoofedBoatPlayers = function()
     for i, fakeModel in pairs(State.FakeBoatPlayers) do
-        pcall(function()
+        Util.safeCall("cleanupSpoofedBoatPlayers:L4458", function()
             if fakeModel and fakeModel.Parent then
                 fakeModel:Destroy()
             end
@@ -4229,10 +4192,9 @@ cleanupSpoofedBoatPlayers = function()
     State.SpoofedSeatedCount = 0
 end
 
--- Hàm dò tìm đảo Frozen Dimension & NPC Frozen Watcher
 local function findFrozenDimensionTarget()
     local fdCF, fdObj = nil, nil
-    pcall(function()
+    Util.safeCall("findFrozenDimensionTarget:L4471", function()
         local wo = workspace:FindFirstChild("_WorldOrigin")
         local locs = wo and wo:FindFirstChild("Locations")
         if locs then
@@ -4267,7 +4229,6 @@ local function findFrozenDimensionTarget()
     return fdCF, fdObj
 end
 
--- Hàm quét toàn bộ các đoạn đuôi Leviathan (Leviathan Segment) và Đầu/Thân chính (Leviathan)
 local function scanLeviathanEntities()
     local segments = {}
     local mainBoss = nil
@@ -4332,9 +4293,8 @@ local function scanLeviathanEntities()
     return segments, mainBoss
 end
 
--- 2. HÀM TỰ ĐỘNG ĐÁNH LEVIATHAN & TỰ ĐỔI SANG ĐUÔI KHÁC KHI GÂY ĐỦ DAME (>= 15% HP MỖI ĐUÔI)
 executeAttackLeviathanStep = function()
-    if updateDashboardUI then pcall(updateDashboardUI) end
+    if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
     if CurrentSea ~= 3 then
         travelToSea(3)
         return false
@@ -4344,7 +4304,7 @@ executeAttackLeviathanStep = function()
     if not root or not hum then return false end
 
     if Config.Spoof5PlayersBoat then
-        pcall(executeSpoof5PlayersBoatStep)
+        Util.safeCall("executeSpoof5PlayersBoatStep", executeSpoof5PlayersBoatStep)
     end
 
     local segments, mainBoss = scanLeviathanEntities()
@@ -4359,7 +4319,6 @@ executeAttackLeviathanStep = function()
     local phaseBanner = ""
 
     if #segments > 0 then
-        -- Kiểm tra xem còn đoạn đuôi (Leviathan Segment) nào CHƯA ĐỦ ngưỡng Dame (>= 15% HP) hay không
         local uncreditSegments = {}
         for idx, seg in ipairs(segments) do
             if not seg.EnoughDamage then
@@ -4368,7 +4327,6 @@ executeAttackLeviathanStep = function()
         end
 
         if #uncreditSegments > 0 then
-            -- Nếu đang đánh 1 đuôi mà đuôi đó VỪA ĐẠT ĐỦ DAME (>= 15% HP), lập tức đổi sang đuôi tiếp theo chưa đủ dame!
             local picked = uncreditSegments[1]
             for _, item in ipairs(uncreditSegments) do
                 if item.Seg.Model == State.LeviathanCurrentSegment then
@@ -4396,7 +4354,6 @@ executeAttackLeviathanStep = function()
                 targetThreshold * 100
             )
         else
-            -- Tất cả các đuôi đều đã nhận đủ >= 15% Dame (đảm bảo rơi 100% Leviathan Scale ở mọi đuôi!) -> Lần lượt kết liễu từng đuôi còn sống!
             chosenTarget = segments[1]
             chosenIndex = 1
             State.LeviathanCurrentSegment = chosenTarget.Model
@@ -4409,7 +4366,6 @@ executeAttackLeviathanStep = function()
             )
         end
     elseif mainBoss then
-        -- Khi toàn bộ các đoạn đuôi (Leviathan Segment) đã bị phá hủy -> Chuyển sang đánh Đầu / Thân chính Leviathan!
         chosenTarget = mainBoss
         State.LeviathanCurrentSegment = mainBoss.Model
         phaseBanner = string.format(
@@ -4422,7 +4378,6 @@ executeAttackLeviathanStep = function()
     if chosenTarget and chosenTarget.Root then
         State.LockedMob = chosenTarget.Model
         local tPos = chosenTarget.Root.Position
-        -- Giữ nhân vật bay lơ lửng phía trên đuôi/đầu Leviathan (Y tối thiểu >= 55 trên mặt biển để không bị sát thương nước biển & né sóng đóng băng!)
         local safeAttackY = math.max(tPos.Y + 18, 55)
         local attackCF = CFrame.new(tPos.X, safeAttackY, tPos.Z)
         State.PosMon = CFrame.new(tPos.X, tPos.Y, tPos.Z)
@@ -4435,7 +4390,7 @@ executeAttackLeviathanStep = function()
         moveToTarget(attackCF)
 
         if (root.Position - tPos).Magnitude <= 155 and Config.FastAttack then
-            pcall(executeFastAttack)
+            Util.safeCall("executeFastAttack", executeFastAttack)
         end
         return true
     end
@@ -4443,9 +4398,8 @@ executeAttackLeviathanStep = function()
     return false
 end
 
--- 3. HÀM TỰ ĐỘNG TÌM ĐẢO LEVIATHAN (Hối Lộ Spy + Lái Thuyền Beast Hunter Ra Tầng 6 + Mở Cổng Frozen Watcher)
 executeFindLeviathanStep = function()
-    if updateDashboardUI then pcall(updateDashboardUI) end
+    if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
     if CurrentSea ~= 3 then
         travelToSea(3)
         return
@@ -4454,7 +4408,6 @@ executeFindLeviathanStep = function()
     local root, hum = getCharacterRoot()
     if not root or not hum then return end
 
-    -- Nếu bật kèm Giả Lập 5 Player Trên Thuyền Beast Hunter -> Duy trì 5/5 ghế ngồi liên tục
     local seatedCount = 1
     local boat = nil
     if Config.Spoof5PlayersBoat then
@@ -4463,23 +4416,24 @@ executeFindLeviathanStep = function()
         boat = findBeastHunterBoat()
     end
 
-    -- Ưu tiên 1: Nếu Boss Leviathan hoặc các đoạn đuôi Leviathan Segment đã xuất hiện -> Đánh ngay lập tức!
     local segments, mainBoss = scanLeviathanEntities()
     if #segments > 0 or mainBoss then
         executeAttackLeviathanStep()
         return
     end
 
-    -- Ưu tiên 2: Kiểm tra xem đảo Frozen Dimension (Chiều Không Gian Đóng Băng) đã xuất hiện chưa
     local fdCF, fdObj = findFrozenDimensionTarget()
     if fdCF then
         local distToFD = (root.Position - fdCF.Position).Magnitude
-        -- Nếu có thuyền Beast Hunter, di chuyển cả thuyền tới cổng Frozen Dimension cùng nhân vật
         if boat then
-            pcall(function()
+            Util.safeCall("executeFindLeviathanStep:L4715", function()
+                local targetBoatCF = CFrame.new(fdCF.Position.X, math.max(fdCF.Position.Y, 26), fdCF.Position.Z)
+                if type(boat.PivotTo) == "function" then
+                    pcall(boat.PivotTo, boat, targetBoatCF)
+                end
                 for _, part in ipairs(boat:GetDescendants()) do
                     if part:IsA("BasePart") then
-                        part.CFrame = CFrame.new(fdCF.Position.X, math.max(fdCF.Position.Y, 26), fdCF.Position.Z)
+                        part.CFrame = targetBoatCF
                     end
                 end
             end)
@@ -4497,7 +4451,6 @@ executeFindLeviathanStep = function()
             return
         end
 
-        -- Đã tới sát NPC Frozen Watcher tại Frozen Dimension (<= 18 studs) -> Gọi mở cổng triệu hồi Leviathan (kèm gói 5 Player Spoof nếu bật!)
         interactWithNpcOrObject(fdObj, fdCF)
         if (os.clock() - (State.LastFrozenWatcherInvokeClock or 0)) >= 0.8 then
             State.LastFrozenWatcherInvokeClock = os.clock()
@@ -4516,17 +4469,15 @@ executeFindLeviathanStep = function()
         return
     end
 
-    -- Ưu tiên 3: Hối lộ NPC Spy (InfoLeviathan) định kỳ để tăng tối đa tỷ lệ ra đảo Frozen Dimension
     if (os.clock() - (State.LastSpyBribeClock or 0)) >= 3.5 then
         State.LastSpyBribeClock = os.clock()
-        pcall(function()
+        Util.safeCall("executeFindLeviathanStep:L4758", function()
             local r1 = CommF_:InvokeServer("InfoLeviathan", "1")
             local r2 = CommF_:InvokeServer("InfoLeviathan", "2")
             State.LastSpyResponse = tostring(r2 or r1 or "")
         end)
     end
 
-    -- Ưu tiên 4: Nếu chưa có thuyền Beast Hunter trong workspace.Boats -> Bay tới Tiki Boat Dealer mua thuyền Beast Hunter
     if not boat then
         local distToDealer = (root.Position - TikiBoatDealerCFrame.Position).Magnitude
         if distToDealer <= 30 and (os.clock() - (State.LastBuyBoatClock or 0)) >= 2.0 then
@@ -4546,7 +4497,6 @@ executeFindLeviathanStep = function()
         end
     end
 
-    -- Ưu tiên 5: Lái thuyền Beast Hunter (kèm 5/5 ghế giả lập nếu bật) tuần tra qua các tọa độ Tầng Biển Nguy Hiểm 6 (Sea Danger Level 6 ????)
     local wp = SeaLevel6Waypoints[State.LeviathanWaypointIdx] or SeaLevel6Waypoints[1]
     local distToWp = (root.Position - wp.Position).Magnitude
     if distToWp <= 35 then
@@ -4555,10 +4505,14 @@ executeFindLeviathanStep = function()
     end
 
     if boat then
-        pcall(function()
+        Util.safeCall("executeFindLeviathanStep:L4794", function()
+            local targetBoatCF = CFrame.new(root.Position.X, 26, root.Position.Z)
+            if type(boat.PivotTo) == "function" then
+                pcall(boat.PivotTo, boat, targetBoatCF)
+            end
             for _, part in ipairs(boat:GetDescendants()) do
                 if part:IsA("BasePart") then
-                    part.CFrame = CFrame.new(root.Position.X, 26, root.Position.Z)
+                    part.CFrame = targetBoatCF
                 end
             end
         end)
@@ -4578,36 +4532,34 @@ executeFindLeviathanStep = function()
 end
 end
 
-task.spawn(function()
+Util.spawnTracked("MainDispatcher", function()
     while State.Running do
         task.wait(0.12)
+        if not State.Running then break end
         if not State.IsHopping then
-            if updateMoonButtonText then pcall(updateMoonButtonText) end
+            if updateMoonButtonText then Util.safeCall("updateMoonButtonText", updateMoonButtonText) end
 
-            -- Nếu đang trong chu trình tìm Server Gần Full Moon / Full Moon (sau khi bấm nút)
             if Config.AutoHopNearFullMoon then
                 local moon = getMoonPhaseInfo()
                 if moon.IsTargetMoon then
                     Config.AutoHopNearFullMoon = false
                     saveConfig()
-                    if updateMoonButtonText then pcall(updateMoonButtonText) end
+                    if updateMoonButtonText then Util.safeCall("updateMoonButtonText", updateMoonButtonText) end
                     if updateStatusUI then
                         updateStatusUI("🎉 ĐÃ VÀO ĐÚNG SERVER " .. moon.Name .. " (" .. moon.TimeStr .. ") -> Đã dừng Hop!", Color3.fromRGB(115, 255, 165))
                     end
                 else
                     hopToServer("Normal", "Trăng " .. moon.ShortName .. " -> Tìm Server Gần Full Moon")
-                    return
                 end
             end
+            if not State.IsHopping then
 
-            -- Nếu bật nút "🔔 Tự Động Triệu Hồi Kata" độc lập thì luôn tự gọi mở cổng ở Sea 3
             if Config.AutoSummonKata and CurrentSea == 3 then
-                pcall(trySummonKataPortal, 2.0)
+                Util.safeCall("trySummonKataPortal", trySummonKataPortal, 2.0)
             end
 
-            -- Nếu bật nút "👥 Giả Lập 5 Player Trên Thuyền Beast Hunter" thì luôn duy trì 5/5 ghế trên thuyền
             if Config.Spoof5PlayersBoat and CurrentSea == 3 then
-                pcall(executeSpoof5PlayersBoatStep)
+                Util.safeCall("executeSpoof5PlayersBoatStep", executeSpoof5PlayersBoatStep)
             end
 
             if not Config.AutoTrainRaceV4 or (State.ActiveMainMode and State.ActiveMainMode ~= "TrainV4") then
@@ -4617,64 +4569,58 @@ task.spawn(function()
                 State.DisableNoClip = false
             end
 
-            -- Ưu tiên đúng chức năng người dùng vừa bật gần nhất (ActiveMainMode), không bị kẹt bởi toggle cũ
             if State.ActiveMainMode == "AttackLeviathan" and Config.AutoAttackLeviathan then
                 if not executeAttackLeviathanStep() and Config.AutoFindLeviathan then
-                    pcall(executeFindLeviathanStep)
+                    Util.safeCall("executeFindLeviathanStep", executeFindLeviathanStep)
                 end
             elseif State.ActiveMainMode == "FindLeviathan" and Config.AutoFindLeviathan then
-                pcall(executeFindLeviathanStep)
+                Util.safeCall("executeFindLeviathanStep", executeFindLeviathanStep)
             elseif State.ActiveMainMode == "TrialV4" and Config.AutoTrialRaceV4 then
-                pcall(executeAutoTrialRaceV4Step)
+                Util.safeCall("executeAutoTrialRaceV4Step", executeAutoTrialRaceV4Step)
             elseif State.ActiveMainMode == "BuyGear" and Config.AutoFlyBuyGear then
-                pcall(executeFlyBuyGearStep)
+                Util.safeCall("executeFlyBuyGearStep", executeFlyBuyGearStep)
             elseif State.ActiveMainMode == "TrainV4" and Config.AutoTrainRaceV4 then
-                pcall(executeTrainRaceV4Step)
+                Util.safeCall("executeTrainRaceV4Step", executeTrainRaceV4Step)
             elseif State.ActiveMainMode == "Kata" and Config.AutoFarmKata then
-                pcall(executeKataFarmStep)
+                Util.safeCall("executeKataFarmStep", executeKataFarmStep)
             elseif State.ActiveMainMode == "Material" and Config.AutoMaterial then
-                pcall(executeSingleMaterialStep)
+                Util.safeCall("executeSingleMaterialStep", executeSingleMaterialStep)
             elseif State.ActiveMainMode == "Godhuman" and Config.AutoGodhuman then
-                pcall(executeGodhumanStep)
+                Util.safeCall("executeGodhumanStep", executeGodhumanStep)
             elseif State.ActiveMainMode == "Level" and Config.AutoFarmLevel then
-                pcall(executeLevelFarmStep)
+                Util.safeCall("executeLevelFarmStep", executeLevelFarmStep)
             elseif Config.AutoAttackLeviathan then
                 if not executeAttackLeviathanStep() and Config.AutoFindLeviathan then
-                    pcall(executeFindLeviathanStep)
+                    Util.safeCall("executeFindLeviathanStep", executeFindLeviathanStep)
                 end
             elseif Config.AutoFindLeviathan then
-                pcall(executeFindLeviathanStep)
+                Util.safeCall("executeFindLeviathanStep", executeFindLeviathanStep)
             elseif Config.AutoTrialRaceV4 then
-                pcall(executeAutoTrialRaceV4Step)
+                Util.safeCall("executeAutoTrialRaceV4Step", executeAutoTrialRaceV4Step)
             elseif Config.AutoFlyBuyGear then
-                pcall(executeFlyBuyGearStep)
+                Util.safeCall("executeFlyBuyGearStep", executeFlyBuyGearStep)
             elseif Config.AutoTrainRaceV4 then
-                pcall(executeTrainRaceV4Step)
+                Util.safeCall("executeTrainRaceV4Step", executeTrainRaceV4Step)
             elseif Config.AutoFarmKata then
-                pcall(executeKataFarmStep)
+                Util.safeCall("executeKataFarmStep", executeKataFarmStep)
             elseif Config.AutoGodhuman then
-                pcall(executeGodhumanStep)
+                Util.safeCall("executeGodhumanStep", executeGodhumanStep)
             elseif Config.AutoMaterial then
-                pcall(executeSingleMaterialStep)
+                Util.safeCall("executeSingleMaterialStep", executeSingleMaterialStep)
             elseif Config.AutoFarmLevel then
-                pcall(executeLevelFarmStep)
+                Util.safeCall("executeLevelFarmStep", executeLevelFarmStep)
             else
                 stopTween()
                 removeAntiFall()
                 State.PosMon = nil
                 State.LockedMob = nil
             end
+            end
         end
     end
 end)
 
--- ============================================================================
--- 9. GIAO DIỆN STAR HUB V4.3 (VUỐT LÊN/XUỐNG MƯỢT, CHỈNH TỐC ĐỘ +1, AUTO SAVE)
--- ============================================================================
--- Hàm gắn ScreenGui an toàn tuyệt đối (bọc pcall ngay tại bước gán .Parent để chống lỗi
--- "The current thread cannot access 'CoreGui' (lacking capability Plugin)" trên các Executor thiếu quyền PluginSecurity!)
 local function mountSafeScreenGui(gui)
-    -- 1. Thử gắn vào gethui() nếu Executor hỗ trợ
     if gethui then
         local ok = pcall(function()
             local hui = gethui()
@@ -4687,7 +4633,6 @@ local function mountSafeScreenGui(gui)
         end
     end
 
-    -- 2. Thử gắn vào CoreGui BÊN TRONG pcall (nếu Executor chặn quyền Plugin trên CoreGui, pcall sẽ bắt lỗi êm ái và chuyển xuống bước 3!)
     if CoreGui then
         local ok = pcall(function()
             local _ = CoreGui.Name
@@ -4698,7 +4643,6 @@ local function mountSafeScreenGui(gui)
         end
     end
 
-    -- 3. Fallback an toàn 100% trên mọi Executor: gắn vào LocalPlayer.PlayerGui (với ResetOnSpawn = false để giữ nguyên UI khi chết!)
     local pGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
         or LocalPlayer:FindFirstChild("PlayerGui")
         or LocalPlayer:WaitForChild("PlayerGui", 5)
@@ -4711,9 +4655,6 @@ local function mountSafeScreenGui(gui)
     return nil
 end
 
--- ============================================================================
--- AVATAR HÌNH TRÒN MAID HUB (NHÚNG TRỰC TIẾP TỪ ẢNH "bê trà 1.jpg" ĐÃ CẮT TRÒN)
--- ============================================================================
 local MaidHubAvatarFileName = "MaidHub_Avatar_Circle.png"
 local MaidHubAvatarBase64 = "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"
 
@@ -4826,14 +4767,13 @@ local TitleLabel = Instance.new("TextLabel")
 TitleLabel.Size = UDim2.new(1, -160, 1, 0)
 TitleLabel.Position = UDim2.new(0, 44, 0, 0)
 TitleLabel.BackgroundTransparency = 1
-TitleLabel.Text = "🌸 MAID HUB V5.7  |  AUTO SAVE & SMOOTH FLY"
+TitleLabel.Text = "🌸 MAID HUB V5.8  |  AUTO SAVE & SMOOTH FLY"
 TitleLabel.TextColor3 = Color3.fromRGB(175, 225, 255)
 TitleLabel.Font = Enum.Font.GothamBold
 TitleLabel.TextSize = 13
 TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
 TitleLabel.Parent = TopBar
 
--- Nút Cuộn Lên (▲) / Cuộn Xuống (▼) hỗ trợ kèm thao tác vuốt cảm ứng
 local ScrollUpBtn = Instance.new("TextButton")
 ScrollUpBtn.Size = UDim2.new(0, 28, 0, 26)
 ScrollUpBtn.Position = UDim2.new(1, -104, 0, 7)
@@ -4967,8 +4907,8 @@ updateDashboardUI = function()
     local tName = charTool and charTool.Name or "Chưa cầm"
     local moon = getMoonPhaseInfo()
     PlayerLine.Text = string.format("Sea: %d | %s | Bay: %d | Cầm: %s (Mas: %s)", CurrentSea, moon.ShortName, Config.TweenSpeed, tName, tostring(mas))
-    if updateMaterialSelectorText then pcall(updateMaterialSelectorText) end
-    if updateMoonButtonText then pcall(updateMoonButtonText) end
+    if updateMaterialSelectorText then Util.safeCall("updateMaterialSelectorText", updateMaterialSelectorText) end
+    if updateMoonButtonText then Util.safeCall("updateMoonButtonText", updateMoonButtonText) end
 end
 
 local Scroll = Instance.new("ScrollingFrame")
@@ -4989,7 +4929,24 @@ Layout.Padding = UDim.new(0, 7)
 Layout.SortOrder = Enum.SortOrder.LayoutOrder
 Layout.Parent = Scroll
 
--- Hỗ trợ vuốt cảm ứng (Touch Swipe) & lăn chuột lên xuống mượt mà ngay cả khi chạm vào nút bấm
+local function getMaxScrollOffset()
+    local contentY = (Layout.AbsoluteContentSize and Layout.AbsoluteContentSize.Y) or 1020
+    local viewY = (Scroll.AbsoluteSize and Scroll.AbsoluteSize.Y) or 300
+    return math.max(580, contentY - viewY + 20)
+end
+
+local function refreshScrollCanvasSize()
+    pcall(function()
+        if Layout.AbsoluteContentSize and Layout.AbsoluteContentSize.Y > 0 then
+            Scroll.CanvasSize = UDim2.new(0, 0, 0, Layout.AbsoluteContentSize.Y + 16)
+        end
+    end)
+end
+
+if Layout.GetPropertyChangedSignal then
+    table.insert(State.Connections, Layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(refreshScrollCanvasSize))
+end
+
 local swipeActive = false
 local swipeStartY = 0
 local swipeStartCanvasY = 0
@@ -5010,7 +4967,8 @@ table.insert(State.Connections, UserInputService.InputChanged:Connect(function(i
     if swipeActive and (input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseMovement) then
         local deltaY = swipeStartY - input.Position.Y
         if math.abs(deltaY) > 6 then
-            local newY = math.max(0, math.min(580, swipeStartCanvasY + deltaY))
+            refreshScrollCanvasSize()
+            local newY = math.max(0, math.min(getMaxScrollOffset(), swipeStartCanvasY + deltaY))
             Scroll.CanvasPosition = Vector2.new(0, newY)
         end
     end
@@ -5023,8 +4981,9 @@ table.insert(State.Connections, UserInputService.InputEnded:Connect(function(inp
 end))
 
 local function scrollByOffset(deltaY)
+    refreshScrollCanvasSize()
     local curY = (Scroll.CanvasPosition and Scroll.CanvasPosition.Y) or 0
-    local nextY = math.max(0, math.min(580, curY + deltaY))
+    local nextY = math.max(0, math.min(getMaxScrollOffset(), curY + deltaY))
     Scroll.CanvasPosition = Vector2.new(0, nextY)
 end
 
@@ -5132,7 +5091,6 @@ createToggleRow("🧪 Auto Farm Nguyên Liệu Đang Chọn", Config.AutoMateria
     end
 end)
 
--- Hàng chỉnh Tốc Độ Bay theo từng +1 / -1 (Kèm -10 / +10)
 local SpeedRow = Instance.new("Frame")
 SpeedRow.LayoutOrder = 4
 SpeedRow.Size = UDim2.new(1, -10, 0, 38)
@@ -5281,7 +5239,6 @@ updateMaterialSelectorText()
 local function stepSelectedMaterial(delta)
     MatIdx = ((MatIdx - 1 + delta) % #MatNames) + 1
     Config.SelectedMaterial = MatNames[MatIdx]
-    -- Xóa khóa mục tiêu cũ để nhân vật chuyển ngay lập tức sang bãi quái của nguyên liệu mới
     State.LockedMob = nil
     State.PosMon = nil
     State.SpawnPointIndex = 1
@@ -5371,7 +5328,6 @@ createToggleRow("🌐 Tự Hop Server Khi Trống Bãi / Thiếu Boss Key", Conf
     Config.AutoHopWhenEmpty = v
 end)
 
--- Nút bấm hành động (Click Button): Vào Server Gần Full Moon (4/5 - 75%) hoặc Đang Full Moon (5/5 - 100%)
 local HopNearFullMoonBtn = Instance.new("TextButton")
 HopNearFullMoonBtn.Name = "HopNearFullMoonBtn"
 HopNearFullMoonBtn.LayoutOrder = 4
@@ -5407,7 +5363,6 @@ end
 updateMoonButtonText()
 
 HopNearFullMoonBtn.MouseButton1Click:Connect(function()
-    -- Nếu đang trong quá trình tự động Hop tìm trăng mà bấm lại -> Dừng tìm
     if Config.AutoHopNearFullMoon and State.IsHopping then
         Config.AutoHopNearFullMoon = false
         State.IsHopping = false
@@ -5420,7 +5375,6 @@ HopNearFullMoonBtn.MouseButton1Click:Connect(function()
     end
 
     local moon = getMoonPhaseInfo()
-    -- Nếu Server hiện tại ĐÃ LÀ Gần Full Moon (4/5 - 75%) hoặc Full Moon (5/5 - 100%)
     if moon.IsTargetMoon then
         if not State.LastGoodMoonClickClock or (os.clock() - State.LastGoodMoonClickClock) > 6.0 then
             State.LastGoodMoonClickClock = os.clock()
@@ -5432,7 +5386,6 @@ HopNearFullMoonBtn.MouseButton1Click:Connect(function()
             end
             return
         end
-        -- Nếu bấm lần thứ 2 liên tiếp trong 6s -> Chuyển sang tìm Server Gần Full Moon khác
         State.LastGoodMoonClickClock = nil
     end
 
@@ -5576,7 +5529,7 @@ end)
 createToggleRow("🔔 Tự Động Triệu Hồi Kata (Auto Mở Cổng Khi Đủ 500 Quái)", Config.AutoSummonKata, 5, function(v)
     Config.AutoSummonKata = v
     if v then
-        pcall(trySummonKataPortal, 0)
+        Util.safeCall("trySummonKataPortal", trySummonKataPortal, 0)
         updateStatusUI("Đã BẬT Tự Động Triệu Hồi Kata (Cake Prince / Dough King)", Color3.fromRGB(120, 255, 165))
     else
         updateStatusUI("Đã TẮT Tự Động Triệu Hồi Kata (Chỉ farm quái & đánh khi Boss ra)", Color3.fromRGB(255, 210, 120))
@@ -5585,12 +5538,12 @@ end)
 
 createToggleRow("🧬 Auto Bật Tộc V3 (Tự Kích Hoạt Kỹ Năng Tộc)", Config.AutoRaceV3, 13, function(v)
     Config.AutoRaceV3 = v
-    if v then pcall(executeRaceAbilities) end
+    if v then Util.safeCall("executeRaceAbilities", executeRaceAbilities) end
 end)
 
 createToggleRow("🔥 Auto Bật Tộc V4 (Tự Thức Tỉnh Khi Đầy Nộ)", Config.AutoRaceV4, 12, function(v)
     Config.AutoRaceV4 = v
-    if v then pcall(executeRaceAbilities) end
+    if v then Util.safeCall("executeRaceAbilities", executeRaceAbilities) end
 end)
 
 local QuickRow = Instance.new("Frame")
@@ -5662,15 +5615,19 @@ table.insert(State.Connections, UserInputService.InputBegan:Connect(function(inp
 end))
 
 task.spawn(function()
-    pcall(refreshInventoryCounts)
-    pcall(updateMasteryFromEquipped)
-    if updateDashboardUI then pcall(updateDashboardUI) end
+    Util.safeCall("refreshInventoryCounts", refreshInventoryCounts)
+    Util.safeCall("updateMasteryFromEquipped", updateMasteryFromEquipped)
+    if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
 end)
 
 end
 
 local function cleanupMaidHub()
     State.Running = false
+    Util.Shutdown = true
+    Util.cancelAll()
+    Util.RemoteCache = {}
+    Util.RemoteCacheCount = 0
     Config.AutoFarmLevel = false
     Config.AutoGodhuman = false
     Config.AutoMaterial = false
@@ -5682,7 +5639,7 @@ local function cleanupMaidHub()
     Config.AutoFindLeviathan = false
     Config.AutoAttackLeviathan = false
     Config.Spoof5PlayersBoat = false
-    pcall(cleanupSpoofedBoatPlayers)
+    Util.safeCall("cleanupSpoofedBoatPlayers", cleanupSpoofedBoatPlayers)
     State.IsHoveringV4Sky = false
     stopTween()
     removeAntiFall()
