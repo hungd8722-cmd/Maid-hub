@@ -4,8 +4,8 @@ end
 
 local CONFIG = {
     HubName          = "Maid Hub",
-    SubTitle         = "v5.8",
-    Version          = "5.8",
+    SubTitle         = "make by skibidi Razen and Long",
+    Version          = "BETA",
     SaveFolder       = "maidhub.json",
     ConfigFile       = "MaidHub_Config.json",
     DiscordLink      = "https://discord.gg/9KhYDxXMQP",
