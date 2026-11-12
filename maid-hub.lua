@@ -31,7 +31,7 @@ local GuiService = safeGetService("GuiService")
 local Lighting = safeGetService("Lighting")
 
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
-local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 15) or ReplicatedStorage:FindFirstChild("Remotes")
 
 local Util = {
     DebugLog = (env.MaidHubDebug ~= false),
@@ -42,8 +42,10 @@ local Util = {
     RemoteCacheCount = 0,
     RemoteNextSlot = 0,
     Threads = {},
-    RealCommF = Remotes:WaitForChild("CommF_"),
+    RealCommF = Remotes and (Remotes:WaitForChild("CommF_", 15) or Remotes:FindFirstChild("CommF_")) or nil,
     RemoteLimits = {
+        Cousin = 1.0,
+        BuyHaki = 0.8,
         getInventory = 0.9,
         CakePrinceSpawner = 1.0,
         Bones = 0.9,
@@ -392,6 +394,8 @@ local function toFlatCFrame(cfOrVec, extraY)
     return CFrame.new(p.X, p.Y + (extraY or 0), p.Z)
 end
 
+local updateMoonButtonText, getMoonPhaseInfo, hopToServer
+do
 local function loadVisitedServers()
     State.VisitedServers[CurrentJobId] = os.time()
     if readfile and isfile then
@@ -562,9 +566,8 @@ local function fetchFromPublicApi(sortOrder)
     return list
 end
 
-local updateMoonButtonText
 
-local function getMoonPhaseInfo()
+getMoonPhaseInfo = function()
     local tex = ""
     local clockTime = 18.0
     pcall(function()
@@ -694,7 +697,7 @@ local function getMoonPhaseInfo()
     }
 end
 
-local function hopToServer(mode, reason)
+hopToServer = function(mode, reason)
     if State.IsHopping then return end
     State.IsHopping = true
     mode = mode or "Normal"
@@ -851,6 +854,7 @@ table.insert(State.Connections, TeleportService.TeleportInitFailed:Connect(funct
         dismissTeleportErrorPrompts()
     end
 end))
+end
 
 local function travelToSea(targetSea)
     if CurrentSea == targetSea then return true end
@@ -1090,6 +1094,8 @@ table.insert(State.Connections, RunService.Heartbeat:Connect(function(dt)
     stepPureFlight(dt or (1 / 60), false)
 end))
 
+local cleanMobName, isMobMatchingList, getQuestForPlayer, checkQuestStatus, getEnemySpawnPoints
+do
 local QuestList = {
     [1] = {
         { Min = 1,   Max = 9,   Mon = "Bandit",              QName = "BanditQuest1",     QId = 1, QPos = CFrame.new(1059, 16, 1549),    MPos = CFrame.new(1145, 17, 1634) },
@@ -1191,13 +1197,13 @@ local QuestList = {
     }
 }
 
-local function cleanMobName(name)
+cleanMobName = function(name)
     if not name then return "" end
     local cleaned = string.gsub(tostring(name), "%s*%[Lv%.%s*%d+%]", "")
     return string.lower(cleaned)
 end
 
-local function isMobMatchingList(actualName, filterList)
+isMobMatchingList = function(actualName, filterList)
     if not actualName or not filterList then return false end
     local cleanedActual = cleanMobName(actualName)
     for _, target in ipairs(filterList) do
@@ -1257,7 +1263,7 @@ local function findDynamicQuestLocations(qInfo)
     return foundNpcCFrame, foundMobCFrames
 end
 
-local function getQuestForPlayer()
+getQuestForPlayer = function()
     local level = 1
     pcall(function()
         level = LocalPlayer.Data.Level.Value
@@ -1296,7 +1302,7 @@ local function getQuestForPlayer()
     return list[1], level
 end
 
-local function checkQuestStatus(qInfo)
+checkQuestStatus = function(qInfo)
     local pGui = LocalPlayer:FindFirstChild("PlayerGui")
     local mainGui = pGui and pGui:FindFirstChild("Main")
     local questFrame = mainGui and mainGui:FindFirstChild("Quest")
@@ -1324,7 +1330,7 @@ local function checkQuestStatus(qInfo)
     return false, true
 end
 
-local function getEnemySpawnPoints(mobNamesOrSingle, fallbackCFrameOrList)
+getEnemySpawnPoints = function(mobNamesOrSingle, fallbackCFrameOrList)
     local points = {}
     local filterList = type(mobNamesOrSingle) == "table" and mobNamesOrSingle or { tostring(mobNamesOrSingle) }
     local origin = workspace:FindFirstChild("_WorldOrigin")
@@ -1344,6 +1350,7 @@ local function getEnemySpawnPoints(mobNamesOrSingle, fallbackCFrameOrList)
         table.insert(points, fallbackCFrameOrList)
     end
     return points
+end
 end
 
 local RequiredMaterials = {
@@ -1455,6 +1462,8 @@ local MaterialVietnameseNames = {
     ["Yeti Fur"]             = "Lông Yeti (Sea 1)"
 }
 
+local refreshInventoryCounts
+do
 local MaterialAliasMap = {
     ["Fish Tail"] = "Fish Tail", ["FishTail"] = "Fish Tail", ["Đuôi Cá"] = "Fish Tail", ["Duoi Ca"] = "Fish Tail", ["Đuôi Người Cá"] = "Fish Tail",
     ["Magma Ore"] = "Magma Ore", ["MagmaOre"] = "Magma Ore", ["Quặng Dung Nham"] = "Magma Ore", ["Quặng Magma"] = "Magma Ore", ["Quang Magma"] = "Magma Ore", ["Quang Dung Nham"] = "Magma Ore", ["Đá Dung Nham"] = "Magma Ore",
@@ -1569,7 +1578,7 @@ local function readFromUIControllerInventory(targetTable)
     return foundAny
 end
 
-local function refreshInventoryCounts(forceNetwork)
+refreshInventoryCounts = function(forceNetwork)
     local now = os.clock()
     if forceNetwork or not State.LastInventoryFetchClock or (now - State.LastInventoryFetchClock) >= 1.0 then
         State.LastInventoryFetchClock = now
@@ -1618,6 +1627,8 @@ local function refreshInventoryCounts(forceNetwork)
             end
         end
     end
+end
+
 end
 
 local function findAnyMeleeToolInPlayer()
@@ -1949,7 +1960,14 @@ do
             pcall(mHum.ChangeState, mHum, PLATFORM_STANDING)
         end
         local animator = mHum:FindFirstChild("Animator")
-        if animator then animator:Destroy() end
+        if animator and animator.GetPlayingAnimationTracks then
+            local okTracks, tracks = pcall(animator.GetPlayingAnimationTracks, animator)
+            if okTracks and type(tracks) == "table" then
+                for _, tr in ipairs(tracks) do
+                    pcall(tr.Stop, tr)
+                end
+            end
+        end
     end
 
     table.insert(State.Connections, RunService.Heartbeat:Connect(function(dt)
@@ -1989,6 +2007,8 @@ do
     end))
 end
 
+local FastAttackModes, executeFastAttack
+do
 local NetRegisterAttack, NetRegisterHit = nil, nil
 local CameraShakerStopped = false
 
@@ -2027,7 +2047,7 @@ end
 resolveNetRemotes()
 stopCameraShakeOnce()
 
-local FastAttackModes = {
+FastAttackModes = {
     ["SuperFast"]  = { Delay = 0.035, Bursts = 2, Jitter = 0.006, Label = "Siêu Nhanh X2 (Khuyên Dùng)" },
     ["HyperBurst"] = { Delay = 0.025, Bursts = 3, Jitter = 0.004, Label = "Cực Nhanh X3 (Săn Boss)" },
     ["SafeHuman"]  = { Delay = 0.060, Bursts = 1, Jitter = 0.012, Label = "An Toàn (Nhịp Tự Nhiên)" }
@@ -2058,7 +2078,7 @@ local function getActiveCombatController()
     return CachedCombatCtrlTable and CachedCombatCtrlTable.activeController or nil
 end
 
-local function executeFastAttack()
+executeFastAttack = function()
     local gateCfg = FastAttackModes[Config.FastAttackMode] or FastAttackModes["SuperFast"]
     local gateNow = os.clock()
     if (gateNow - (State.LastFastAttackSend or 0)) < ((gateCfg.Delay or 0.035) * 0.8) then return end
@@ -2161,7 +2181,10 @@ local function executeFastAttack()
             ctrl.blocking = false
             ctrl.focusStart = 0
             ctrl.hitboxMagnitude = 65
-            ctrl.increment = (bursts >= 2) and 4 or 3
+            local animList = (type(ctrl.anims) == "table" and type(ctrl.anims.basic) == "table") and ctrl.anims.basic or nil
+            local maxAnimIdx = (animList and #animList > 0) and #animList or 1
+            local desiredInc = (bursts >= 2) and 4 or 3
+            ctrl.increment = math.min(desiredInc, maxAnimIdx)
             if ctrl.humanoid then
                 ctrl.humanoid.AutoRotate = true
             end
@@ -2173,7 +2196,9 @@ local function executeFastAttack()
                     rigEvent:FireServer("hit", bladeHits, 2, "")
                 end
             end
-            if ctrl.attack then pcall(function() ctrl:attack() end) end
+            if ctrl.attack and animList and animList[ctrl.increment] ~= nil then
+                pcall(function() ctrl:attack() end)
+            end
         end
     end)
 
@@ -2200,6 +2225,10 @@ Util.spawnTracked("FastAttackLoop", function()
     end
 end)
 
+end
+
+local executeLevelFarmStep, trySummonKataPortal, executeGodhumanStep, executeSingleMaterialStep, executeKataFarmStep, executeTrainRaceV4Step
+do
 local MaterialSpots = {
     ["Fish Tail"] = {
         PreferredSea = 1,
@@ -2634,7 +2663,7 @@ local function engageMobGroup(mobNames, waitCFrame, weaponOverride, statusPrefix
     end
 end
 
-local function executeLevelFarmStep(weaponOverride, customBanner)
+executeLevelFarmStep = function(weaponOverride, customBanner)
     if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
     local root, hum = getCharacterRoot()
     if not root or not hum then return end
@@ -2754,7 +2783,7 @@ local function tryBuyAndCheckStyle(styleEntry)
     return false
 end
 
-local function trySummonKataPortal(intervalSec)
+trySummonKataPortal = function(intervalSec)
     if CurrentSea ~= 3 then return end
     local cooldown = intervalSec or 2.0
     if (os.clock() - (State.LastCakeSpawnerClock or 0)) >= cooldown then
@@ -2962,7 +2991,7 @@ local function handleSpecialStyleUnlock(styleEntry)
     end
 end
 
-local function executeGodhumanStep()
+executeGodhumanStep = function()
     updateMasteryFromEquipped()
     refreshInventoryCounts()
     if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
@@ -3093,7 +3122,7 @@ local function executeGodhumanStep()
     end)
 end
 
-local function executeSingleMaterialStep()
+executeSingleMaterialStep = function()
     refreshInventoryCounts()
     if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
 
@@ -3152,7 +3181,7 @@ local function executeSingleMaterialStep()
     )
 end
 
-local function executeKataFarmStep()
+executeKataFarmStep = function()
     if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
     if CurrentSea ~= 3 then
         travelToSea(3)
@@ -3190,7 +3219,7 @@ local function executeKataFarmStep()
     )
 end
 
-local function executeTrainRaceV4Step()
+executeTrainRaceV4Step = function()
     if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
     if CurrentSea ~= 3 then
         State.IsHoveringV4Sky = false
@@ -3259,6 +3288,10 @@ local function executeTrainRaceV4Step()
     )
 end
 
+end
+
+local getPlayerRaceName, getObjectCFrame, interactWithNpcOrObject, executeFlyBuyGearStep, executeAutoTrialRaceV4Step
+do
 local GreatTreeTopNpcCFrame   = CFrame.new(2860.95, 2280.42, -7218.52)
 local TempleOfTimeEntranceVec = Vector3.new(28286.35546875, 14895.3017578125, 102.62469482421875)
 local AncientOneCFrame        = CFrame.new(28973.08, 14891.80, -120.29)
@@ -3274,7 +3307,7 @@ local RaceTrialDoorCFrames = {
     ["Ghoul"]   = CFrame.new(28674.244140625, 14890.6767578125, 445.4310607910156)
 }
 
-local function getPlayerRaceName()
+getPlayerRaceName = function()
     local r = "Human"
     pcall(function()
         r = tostring(LocalPlayer.Data.Race.Value)
@@ -3282,7 +3315,7 @@ local function getPlayerRaceName()
     return r
 end
 
-local function getObjectCFrame(obj)
+getObjectCFrame = function(obj)
     if not obj then return nil end
     if obj:IsA("BasePart") then
         return obj.CFrame
@@ -3331,7 +3364,7 @@ local function triggerGuiButton(btn)
     end)
 end
 
-local function interactWithNpcOrObject(obj, targetCF)
+interactWithNpcOrObject = function(obj, targetCF)
     pcall(function()
         local root = getCharacterRoot()
         if root and targetCF and (root.Position - targetCF.Position).Magnitude <= 18 and (root.Position - targetCF.Position).Magnitude > 3.0 then
@@ -3541,7 +3574,7 @@ local function ensureInsideTempleOfTime()
     return false
 end
 
-local function executeFlyBuyGearStep()
+executeFlyBuyGearStep = function()
     if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
     if CurrentSea ~= 3 then
         travelToSea(3)
@@ -3596,7 +3629,6 @@ local function executeFlyBuyGearStep()
     end
 end
 
-local executeAutoTrialRaceV4Step
 do
     local function isPositionInTempleHallway(pos)
         return pos.X >= 28050 and pos.X <= 29350
@@ -3991,6 +4023,7 @@ do
             )
         end
     end
+end
 end
 
 local executeSpoof5PlayersBoatStep, cleanupSpoofedBoatPlayers, executeAttackLeviathanStep, executeFindLeviathanStep
@@ -4665,6 +4698,8 @@ local function mountSafeScreenGui(gui)
     return nil
 end
 
+local loadMaidCircularAvatarAsset
+do
 local MaidHubAvatarFileName = "MaidHub_Avatar_Circle.png"
 local MaidHubAvatarBase64 = "iVBORw0KGgoAAAANSUhEUgAAAIAAAACACAMAAAD04JH5AAADAFBMVEX9+vwAAADz6PLn2fEqKDiUwv6Qu/3SyOvU1vTOxtQZGTDGutS4tdHY1Ng2NEquyPb22dauqc6wt+v94d240/spKkauqeasprXX5PzyycjGuerpqqyRmdB/v/+YlrKUpNcVFRWQqOVFRUWqqv9MRVNEOkuMiaymmrHNp6sjHSuGi5SsuMsA//8mJiY1NTXhzPjOtrZ4dorttba3tLmq//80MD2Nh5I2NjZuZ3R3mNIeIDtmZpqlncsLDSZZV2pmWmlJSGi0lZkCN4Q5NzsCAjUzPGNVqv9zdHh4dXyGeo1kZWtra4ptuOzQm6RJW4aYlp2Zo7G1xNzJl5YFBQsbJEQMN3U6RGupiJAXZcc0NGdVVatbebBnZ2dteqtmmc1///+MdXmUnOIBKXUHRpAIVKwsZrZxc4xngrSIaG+Fi8yjq7q4xtpSVFRWZo9yh8mPl6IKCBhEJi5QhsmMkp3FrsXuvMEAAP8vLy8tLVcsV1c0aGg0Z5tBQUFAQIBXVlZAgMBlZ3t/f/92pduBgYGAgMCSmaqZmf+AwMD///8aGRweHSQETaMYYrkpec5JMj1YUVpFkttsU1yapMaUuNm1Z0ywenWvjand8/01KzI7OEAtM088VIQ3htNBPkRSVGlQbqRYg7hepNxYruRiS1Rra4J6foJ0e5h7gZN5hqx6s9uFh52EiqSEjbSKlLWYpLePo7arWT2nssIMDBQXFR8YFyIWFiQdHkECWcIlFB4oLEI+P1w9QFU5Q2Q5RmsxbMAxc7xGRFFTUVRSWoddtexiXGlzdH52f7V+go59gpB9jrJ8kLx/qOZ8xPODS0+HaHeAe6axXEChfImhneC0oJzUwL7in6LywbwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADlSQLCAAABAHRSTlP/AP/////+//7////+///9//7+//z//////////wT9/Rb+RQP///////+PygEqBf//////A///N////wX/////////RQX/A3T//W3////3/63a/zL//////wUE/AX+BQL///////+S/f//tvtS//+c////lv//AQYGBgUFBAQDBI4C/wQEsgUEASYq/////////9L//////0dJrv//SnL//////4t+rf/G/62szMjG//++Rf9Acv///4xj/7fX//9jY8n/coq+laW1/////6X//////////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAupzCrwAAFoxJREFUeNq1m4V/G1fywJ/ek/ftW961pZVkWbIMshzHDLFTx5A0DTfQUCFt0iRN0pSu16Pfce96zFc4ZuYfMzPz7+/5zczuCgyx1OTeJ7YsOd75vpl5M/OIpTps73y87wF46e8fGBjYFTf4sb8fPnyg7/F3dvo81sl/vv/dfbtB9sD3T4319PS4bleXBq2ry3Xh7dip7w8Axe6+d9//6wG4//19IPyZ50/3uF0gFNvGF7fn9PPPAETf+++/5wATIH380FiPi9I0LRKoxS1CoE811/3F0XFgmLinAA8PpvqPkvRICvRVz3HO4sZ5Todfxmya5v7iL/tTgw/fM4BHBlPjb02ka66eYxuabXOmOAMMVBAyuO7fj6cGH7knAO8dTA38Zk/03K6eTcIZV8rjtqUYKYTnXC0i7Tl1IDX43rsGmJhLDYz1xI/kbHNTNn2qzOSXQsoY1x07kJqbuDsAUP4pFA9Py7GtmhLRqzSjHzjTpWAcbYF/9AoY4i4A3jeY2qXTk7bsPMkX0W+EKTnJ51KnT3IRt/63qcH3vVkA0L7rkni2TQPPiwk4qYBDQ28kFklacG+DHd4UwP19qVd60Jbbikf5jCMAR1f06Y2QIF+QL+jcpb//h1Tf/Z0D/EZqj0sjPretfGaT8nWBXVZyGV4FaAS+CzQF+ALTKWpae+BxHQIMpg5h9zWd3aGpSPkok5kF32LC5rYCJYBo08Tv4I4YKd2j2/riNgBz/U8ju8vvIN22bfJ8IZDAt1TcbBu+lCkSpyAlPN0/1wlA3/hpVH/PnXrPualLnVQAjgcSLeizENIqwAu8lRAZwCeg9SDB6fG+9gHm9ujoPbk7yqehZ+Ir9Do8srpS9atHTETgwpa6rmY9hvLRDPg0fc9cmwATgyj/DupXIbM9dDyphO9LwcOVTHro8KKTqYLlsc9cKj2nLKXTGGHcQn3qewYn2gGYeGAPmX/73lvTONjxwaaSpqkOp9NpZ8VJZ1anh1bBNFyH0ahQCVGc5qZkFBL2PDCxM8BE356encz/w1mddAtj3VShY6SjNjzkrC2QApQOlgAC3fRIvhQKO9WzZ3OZsAmgj/p/J/mMP6grHOsUfhYS8aCFzPCwSQBCgXAEkJYS4JyosB7SQd9OAH1k/zvKZ+zcbduD+AMWVkca8tNp8ARye/ABPSbQLd/3yWDCJT/ouzNA33gb8tlXn2W+wKirFpvlp9Oj09HAg1/pSVO+xNgslE0EG0djK8B9/ae1neXb00/qLy9JKdV0q/z0aBgDcL3RlAJtCQhbNsbW0/33bQ/wrt1P39n/4wxgPfnNb3/thqlKG+SnHYgB6ByiGUCHnK0ryNyKoQ6e3v2u7QAmBg/h/9hBPofi69yTf/65r32r5JDQJoAhlE8AIhaey+VgLIBsbusWY9i/Qy3hgLU4IHoq30kBHmfPPnn1xc99+urZdNrINMk3DscAiQpAeO6NnA6RC3xAAgCPBuPWAPelsP85tlOD55ee3H/9c5+6du2c0aIA42QCgE6Qo+6/8QbTb2O89k0LCyXUQeq+rQAe/uCpNgYAdAUQvKv7z12/9slrVw3HceIRiAAhawaAxuDl9hdzVLxB0GBRODj1wYe3AJgbgN+5O8qPUvCzT57b/8lrn7wKkh1ygwhDNQAEAeTY7V8eB61CxMCoiX8KhVrPwNxmgMgAO8qnIoQLsMH+/VevnsO+oxJiRSgsx2IECeJB9fqPu47DNArSsxyxyIKtRkgA3vPELgwTbQBAkDFN86v7sZ2lYRABgBHmsTjjiQ1APkTr3Bf/pev48ZxvSVn8JT0BQ92uJ96zAWBuvKctBTDLVAoARs7t33/ubDz6CQIo0rH2IwBKFrmcexxaF6Rt5VvRI9DVxudaAR6jEJRrA4DNSohtcsQ4t98YbQpBZATschQJYYJC5TKMhR8fP/7XS0FZ+uW4xMhROHqsBWAQPLDLZW21kxBXxPQLRrN8JBhGAJHIB/8nAF3/4neOf7scBKpYCWITQ7ndMzDYDPCh3WPtGQDb59OhkEOGsSEOO46x2gQAomksQFJ8+Tsgv1z0tQQAjTC2+0NNAB9GBfS0J98eNoxFK72pOenhM5I3DUN6g/EwWAoC+eKnisH1cvwMlDbw4QbAY6gArU0FnISA88JnNwOkjdd6sSyOCHIRAAVkKQFg6eL1R3//W8lDNFTBY3WAj467bSuADaWN0VFS/+gGgt5apIGo6UEdQNddvXzx2qcuvsgaKnDHP5oATOx+q7ZzEkriwBDUgBFA4gQRiHHTawGQQUtOrly8eP3iUiIEopH21t0TMcDj/W0F4aiFWAMTwGgCEL/W+EwDQG8GwPIo+PTF69derA90DMj9j8cAHzvabgwA9NnFRHZ9GEavQx7PK9GkgXILgPz0n1WuX6yHWowFRz8WAdyXGtPaHoNKrSYi68OQ3o1e4ADQMAG3irlmAP3FG5XyUkPPYIMxzAgMC9H2xyCbtYdI6N4mgKjNAIDZAMi9NNICIIRfCZoMjTKxQAWA3Ye62nZBABhO7N4CYKx63dwzqR4jH8iZGwGsslYJGrYEoYd2IwBZoN0gwGftSOlGmiLhfCx/Pr3OAACSfgKgv+1Ew/4oXxSKQdAAgFBANmCpvv4OLABT/6j/NBQz8/MxwdDQFPc8L89hqkoeAAA1EMzhS+gFApDFwLVYiw36+wDgiWfctscAs+2Tow0NzNcBbq5OTYXhf6+reBwgQG8dINCjYdECAOPAfeaJFHtH6vn2LQAAK7EGKBkhACDMD08dpgSQl2YMIKU3JQkAYnIEIMpaMwDa4PnUO9gjqdNtJ2IAmK274AsI4MzPYy22XltgYAHuTb6UAKjauh/6Cu2PAGgYv+LebnoWhP/TqUfYR9AF9HYB+GEq/tAHhl6gKsRx5kcX2ULIQHw+L8x4XqCUN6Obpq4sAHApMU0CgGp6lo5O8BH2wACQtOsCkIoWhqIROMUXYoB0+rJarJECAGASOwsK8Lz/U1MmlxaaQGCanLSuuM09zYHmBx5gbz/UfiYGDQxBOQAAxkr+hLcIBG95CyjkD0bT84vhVN7zVB4BODdhGgBv8vwlE3wwApDBUgsA5uRDb2epU+3HYYjEjiINGJffNlO7iXUYEKxU14bSo6PDU55n5qO5oWnybnjjiREEkBGAdSVoAYCen4JhONaBD4KtrUgDC97bem+mh5Fg+Fjx0qVLzx757ne97jxYAQBU3pyprV++fHlxBIRnEWASACoVnbd64ViKdRKGGIPRNk8A6zzfewGdYPgzwyvF0nT1mMkvYDDC9XOhvAufmYdo8dvpmyECSAQoWEG5BYBCEetoELDDjDmRBvhMb82JCFbBy90FmDRDOuCeEHmPXxiaPnZsxQxXR1dNGSCAFFkAaFn7o2HAOhoEvA4wlJ+ZqQ0NI0B66CVdtxRFom761s2PlfzqsRHhff5ffR2lF4ScBAC/xdg0DBBA423HoQUYiDQMIfvNzHz+szQMh/N5cDrudXdHJXl3t+fDVGzBYyOv1ZYFABRMAPCtwLrdLIprMUBX5wBAMM1nbq4OpTESguvlYQx6gAAQ8OUprvuKeb35CzApnRQBaECWLU22mICTBnZ1EgbQB6JRYGTOLnbXFhdxYji8vgnAs00YlPn8+uvY98lsYRIBKnqLE2Ig2MV2aV0dACxwtkKpaG/GMT7rXQ4pF1/ONwEAAf6IH+WnzpwwJ6H5CFAsV3IbALq0TgGskB1eoVScyaT3OQ7VZ8PrUx7JRwAYDDyRnz9zolqQKJsAKlAn3y0AO2mXFjAVZaCBHWiNanRqyvO8ugkYiwG82uvFoo/mvxVMQiC+JwBMHZ7FVOAQgENLM6MLvNZdt0CTCUYqFX8ZAArPZSdldkkL2D0AAB2s7jMWF41MZq8BGEgw1J1Xdfnd3bE6vHwxm12uYix+rjBZyEJFxlpD3psDmA1DAAgBIG1knIxz0Ekbl1ljBNQRukMEKEIY9J8ryEKlGEie2wKgo2EIoWDqJB82HO6cBRvgAtXBg6s3oSSNBHdzniDwfDWbzfoQiApXgCIolgOdt0YcGoYdBSLaKw7ZrGGok+AEeyOAld4pL5KrICSp2BNUCRSQLS5PFvwrvpTZYjbgrQC881DMoj0qtvDCtPnDTObsH6P882snemsRAfkfvvLu2X+qEEBBmssAUCiXpWStghqhONeBfHjGrODTjh0uns04i5nz588fXJ/pPaMoB3iRGbzZ0lIlApAFHynABaW+oaNRMuokHdt21AeY/5ycVrNrmbPTx5zzB5890dvbewLNAAA4QwvLRRBPANkCfN0qSFJA0vOWdNx2QYL7w7QLiKcFdGaOhAvOWcdaObjmr/diO/M/lI69qQtVmAVWliIAbLdkoSjjWRnHjdXmgqTdkszGPxTRTiTj4IvCL4WOsWivVc0jvRFBDaLBVK33QskHgjpAUCyKok8AIJ3TRmtTSdZuUYrUgqoO3BvX4SfLD4FgOrRUDACesH7if3t7/9OXpUqlnJigcMvX/UCTJB4ehDu7TUVpm2V5tAPJbdqQVtgJACiWwmNrfkG+DrIb7cSIaVpFrVxGgEIhK4u+KcuablPHUb5QTWV5mxMTO/YDgSQcV35VGPq+KvnSlOaJfG+ihN7aS9K0CmCEpWKQhXKwALmwADyWTSvItIahmiYm7U3NuN34CTcMVDE0oZ9mqYqbZ7I2QwQzM70nariba1nSL1ayQRZycSHIiivPWbS3Dn6ECoicIJ6atTc5tXnzGgE4QQi1twnyfQRQqgY1KpTJtZopcS3dAgIMhAFOB7LLfskHQ9FOcgRAZ37iyWl703N7wyqFRWc0/LBkknyJBLUa/EDyI4B/z2ZpQiTNEXAC3cY4JEKaPBNAPD1vb4FCtW4b0bkpbpasEbKAksyu4eo8TIrrAEeOFQo0I5RmyeS2F7H7NI4QIFmgaG+Jxm7smMXHJ+BnUGxIFpAstHSf0CIA0yxY0z6Uw0LAKABfTf7eNpGRAOpLNO0sUvE4BkfrP7hxRRtxVgzAwRes6ehISwwgwyopQATZQmgni/hcVUvFUtFCoPoiVTvLdAkAHRQS+I6TJ+BOkJQ8rILOSyGLTzShfLPq41kSXfoBUKpkGX0ks4JRAbSg15fp2lmojETGNhBRTjQ5AaD+SyMwyvyRuBMwPBQoIGuRB/pBuGzFS1c6HzGcg9UCHnBxGwuVbSzVcpVsxOB3EzMSZAPdCi0p2OyyH1qWbyZ7UqAm3aregumYwK0Cq2Qp1BMBYCXnVPFMgdZYqm1jsZrbjWIG8h0d3YIfJEy/WAiuABYITVVqDJPSpSJNx6TEAQF+gUdKUAP7YFLlVGXBbVqsbme5XglP0A6QMn0TWSKVwKAKfdPy0RiWOZIMVl4qVbN+AfoPDhH6FCjokBGvIoDhjOha83L9zhsWNiViW4EURQC2iowxq6DQhJBsqdDk+kiyp7C8fCuLMRIUoEoWOL+pbEuHZxwhgMya37JhsfOWTSMOgXlBJjPjYUXn2EC/dJaOhdH/g8C3fCUICEC3LUFp2DZN6ANutkFbW2rZstlx04onB0ZpKIPfK5HsT6JvwCfCpH1rUkFoCX/5ioULM1IJPYzyiGWaNitFS6yGgy7YtGm107YdjzXAwY/AmgrGAW9qCt1e4k6pGTKOZ4z8/yr6BGDx5LAp+KIYgUntXphZG5e6upYOfLiDjcsEAA+DKEtXolk+1jfc0mnTNpylA5V+1odUXCgU/OTQKbdkuILry3vT6cxBUMBftWxc7rR1qxqpADxRmc3yKVULm8UbpvSflgsyCAqBDBSLD7uK0qqxL9ptzWTAA577ncFONq9VPQjoMOZKpmgBiMJSsmWLbRn3KmE2YikeW4BnyP+x/5kHweH+ZMPm9Q7b93asR11B8AtLerMGKEyrlk8gPkg0QQAAifIi/ycF/LPW9ehDcx0dYJgNMfhBYLFKJeuIqm9Q4z88p4SVfhKosVlc+FCOujBkk0MVx2gA7AUn+GaXVvnDTQcY4iMc20SjaYdyDCQcH8ornmQmIjB1W8QzhnqDrO/LbODiUTZMCBIPHID/47rKeQh6D24+wgFGOIAEdtSU3VwFsqF9CwJyLFQAlHUbx+rxaAyWWGaLVZiyVSEIXASgwIHZyAECkO+8rHU991tzWx7j+QmwBfm8wuUdKJ0b4U9lMukRLPik5R9BT29kJkEljs1YqxOEhaBCABC1MEJBRFqIAG6AB35ly2M8oJUjoIILr/7qV//x6quvnVF112fTGcdYgDwEtd602SSfI6auINyIVhNwM1sOXN1VVIbTnEYoXNTCEdBsgA1HucYxR6yfWT9Tm5pSoq4BvuakFzikVNMKw+Y5Ps4zUMd2a/exYi5mA9y0F5YvkjoFAdABLj3Ut+1htqP1s0QYYesb5o6TDnU8PWOVNixy0DzJjIuVRrQS/i0XAAK8d6CiepiZaIKK1rX0u9seZku9a/cr8XE+3gywmHHSQzpWvyWbtQDwKAjxDVhCXvJdV9ctiFsinpOyaRiBS+gA2x/nS6qznijmJqX0LK6I7zsGjmTOslZRdLpdsY2D17aqKF/HcCCiWTkTjgE5SNP+NHXfHY90fjw60tmkAB03BQxj36rSww2SaJqtxKbgoawinaktC4EuQGfwq4bxKDrgQ31tHWoFgClVNwAC7N3nVM0NfbWj4nBT9rZsCwFkEQAgTdNnztbytzvW63I149GjTzqggQxG8X0ZvnHRBqa7QmwC0BWPAXTu4yl/+LvpfSj/0Yf62j3Y7K7P5GdAw2p4jQAgkO87slEBXInWiJlUsAQgZVnxEbr5YTrGjUj+RNtHuzVzagqKmxVnbYh2RwEgbAUA5UOwsrdY04eCHVvg+yI6wZfet0Ty2znaTYfb47sF3LNLi87wsIMr44axwQWo71sogFvMIwCYftiYJiGSvkz2b+9wOxUHZTqQHyl0zRkGAMhlavOMeQsXhMk7s2mrzvdliGNUPYi3LG48NNfBBYeP/0yLBwNlAnLDDQCk/K0soEPVjEV5YBX1qgWuWkaLjnVywQFv+PyEbrjoQk3jojSuzRvm5ijobVFAQPyxCMCvSvgX3XP5x86ueOAll6N0ySVY+z0nqqX2GuFGgC1dgOEyDQJk/WVllst0HfAbnV5ywWs+4yW6K/VgJq7mjBKPwlpTGNwKADNABOCbAT3CH+/8mg9ddPo3TM9dS+dxd2pvxpgWkjeSwbYagPyjsoEswNyALskFP3hTF53IEb5UoouVNxzaK10TOBUVyVLFNj7Alc4sAAiydEFQK3/5TV71ii67fSC6NnfjPM7ooLgTUfGTjEC647QBQIcADPVYpP3y9+7islt03e+V6Nrc0rOOMaKbyWIP1SHNazeNMAAFmV+Jeu/+4ON3dd0vuvB4IL7wqJVL0lQ63lbA+2VsFtOMzTYSgJNEttcqP7/7C4/Jlc/owimMSjwPQqtfOt3xoYmpEE33X3OUSPDf333pXlz5TC69fqAcXyXVAldSqhO0IkpFYewWTZdetcpTn7hXl17ja7+pv/i5piXXfjUXmmVZMNKxIgUceN+49qv96I9S9/Lab3Lx+RPf+FGg7XTxWQt+9jefuOcXnxtXv7/+1BcCTdv66jcoZmzXwK/p6nfz5fcDR3/6hSAItEYDAwRf+OnRA7/Wy++t1/8B48CBDzz11FPw9b0vH/g63v5/U9f//x9gP7b6lK39WgAAAABJRU5ErkJggg=="
 
@@ -4699,7 +4734,7 @@ local function decodeBase64(data)
     return table.concat(out)
 end
 
-local function loadMaidCircularAvatarAsset()
+loadMaidCircularAvatarAsset = function()
     local assetUrl = ""
     pcall(function()
         local pngBytes = decodeBase64(MaidHubAvatarBase64)
@@ -4718,6 +4753,7 @@ local function loadMaidCircularAvatarAsset()
     State.MaidAvatarAssetUrl = assetUrl
     return assetUrl
 end
+end
 
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "MaidHub_V5_AllInOne"
@@ -4729,12 +4765,13 @@ mountSafeScreenGui(ScreenGui)
 
 table.insert(State.Connections, LocalPlayer.CharacterAdded:Connect(function()
     task.wait(0.5)
+    if not State.Running then return end
     if ScreenGui and (not ScreenGui.Parent or not ScreenGui.Parent.Parent) then
         mountSafeScreenGui(ScreenGui)
     end
 end))
 
-do
+;(function()
 local maidAvatarAsset = loadMaidCircularAvatarAsset()
 
 local Theme = {
@@ -4934,6 +4971,27 @@ MainFrame.Parent = ScreenGui
 addCorner(MainFrame, 12)
 addStroke(MainFrame, Theme.Accent, 1.8)
 
+local MainScale = Instance.new("UIScale", MainFrame)
+local function updateMainFrameScale()
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if cam and cam.ViewportSize then
+            local vp = cam.ViewportSize
+            if vp.X > 0 and vp.Y > 0 then
+                local sx = (vp.X - 20) / 520
+                local sy = (vp.Y - 20) / 395
+                MainScale.Scale = math.clamp(math.min(1, sx, sy), 0.55, 1)
+            end
+        end
+    end)
+end
+updateMainFrameScale()
+pcall(function()
+    if workspace.CurrentCamera then
+        table.insert(State.Connections, workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(updateMainFrameScale))
+    end
+end)
+
 -- TopBar
 local TopBar = Instance.new("Frame")
 TopBar.Name = "TopBar"
@@ -5100,9 +5158,12 @@ switchTab = function(activeKey)
     end
 end
 
+local updateQuickFarmLevel, updateQuickMaterial, updateQuickGodhuman, updateQuickKata, updateQuickLeviathan, updateQuickFastAttack
+
 -- =========================================================================
 -- TAB 1: HOME (Branding, Hub Status, Quick Toggle, Thống kê nguyên liệu)
 -- =========================================================================
+do
 local homePage = pages["Home"]
 
 -- Hub Status Card
@@ -5165,8 +5226,6 @@ local qUIGrid = Instance.new("UIGridLayout", QuickGrid)
 qUIGrid.CellSize = UDim2.new(0.32, -4, 0, 36)
 qUIGrid.CellPadding = UDim2.new(0.02, 0, 0, 6)
 
-local syncToggles = {}
-
 local function createQuickButton(title, isDefaultOn, onClick)
     local qBtn = Instance.new("TextButton", QuickGrid)
     qBtn.BackgroundColor3 = isDefaultOn and Theme.TogOn or Theme.Card
@@ -5195,7 +5254,7 @@ local function createQuickButton(title, isDefaultOn, onClick)
 end
 
 -- 6 Quick Toggles
-local updateQuickFarmLevel = createQuickButton("🌾 Farm Level", Config.AutoFarmLevel, function(v)
+updateQuickFarmLevel = createQuickButton("🌾 Farm Level", Config.AutoFarmLevel, function(v)
     Config.AutoFarmLevel = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5213,7 +5272,7 @@ local updateQuickFarmLevel = createQuickButton("🌾 Farm Level", Config.AutoFar
     if syncToggles.FarmLevel then syncToggles.FarmLevel(v) end
 end)
 
-local updateQuickMaterial = createQuickButton("🧪 Farm NL", Config.AutoMaterial, function(v)
+updateQuickMaterial = createQuickButton("🧪 Farm NL", Config.AutoMaterial, function(v)
     Config.AutoMaterial = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5233,7 +5292,7 @@ local updateQuickMaterial = createQuickButton("🧪 Farm NL", Config.AutoMateria
     if syncToggles.Material then syncToggles.Material(v) end
 end)
 
-local updateQuickGodhuman = createQuickButton("👑 Godhuman", Config.AutoGodhuman, function(v)
+updateQuickGodhuman = createQuickButton("👑 Godhuman", Config.AutoGodhuman, function(v)
     Config.AutoGodhuman = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5249,9 +5308,10 @@ local updateQuickGodhuman = createQuickButton("👑 Godhuman", Config.AutoGodhum
         updateStatusUI("Đã dừng Auto Godhuman", Theme.Yellow)
     end
     if syncToggles.Godhuman then syncToggles.Godhuman(v) end
+    if syncToggles.SettingsGodhuman then syncToggles.SettingsGodhuman(v) end
 end)
 
-local updateQuickKata = createQuickButton("🍰 Farm Kata", Config.AutoFarmKata, function(v)
+updateQuickKata = createQuickButton("🍰 Farm Kata", Config.AutoFarmKata, function(v)
     Config.AutoFarmKata = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5271,7 +5331,7 @@ local updateQuickKata = createQuickButton("🍰 Farm Kata", Config.AutoFarmKata,
     if syncToggles.Kata then syncToggles.Kata(v) end
 end)
 
-local updateQuickLeviathan = createQuickButton("🐉 Leviathan", Config.AutoFindLeviathan, function(v)
+updateQuickLeviathan = createQuickButton("🐉 Leviathan", Config.AutoFindLeviathan, function(v)
     Config.AutoFindLeviathan = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5289,7 +5349,7 @@ local updateQuickLeviathan = createQuickButton("🐉 Leviathan", Config.AutoFind
     if syncToggles.Leviathan then syncToggles.Leviathan(v) end
 end)
 
-local updateQuickFastAttack = createQuickButton("⚡ Fast Attack", Config.FastAttack, function(v)
+updateQuickFastAttack = createQuickButton("⚡ Fast Attack", Config.FastAttack, function(v)
     Config.FastAttack = v
     if syncToggles.FastAttack then syncToggles.FastAttack(v) end
 end)
@@ -5328,8 +5388,6 @@ local function refreshMatBox()
     end
 end
 
-local updateMaterialSelectorText
-
 updateDashboardUI = function()
     local ft = State.InventoryCounts["Fish Tail"] or 0
     local mo = State.InventoryCounts["Magma Ore"] or 0
@@ -5350,14 +5408,17 @@ updateDashboardUI = function()
     pcall(refreshMatBox)
 end
 
+end
+
 -- =========================================================================
 -- TAB 2: FARMING (Cày Level, Vũ khí, Bay, Farm Nguyên liệu, Kata, Xương)
 -- =========================================================================
+do
 local farmPage = pages["Farming"]
 
 createSectionHeader(farmPage, "🎯 CÀY CẤP & NHIỆM VỤ", 1)
 
-local _, _, setFarmLevel = createToggleRow(farmPage, "🔥 Auto Farm Level (Sea 1 / Sea 2 / Sea 3)", Config.AutoFarmLevel, 2, function(v)
+local setFarmLevel = select(3, createToggleRow(farmPage, "🔥 Auto Farm Level (Sea 1 / Sea 2 / Sea 3)", Config.AutoFarmLevel, 2, function(v)
     Config.AutoFarmLevel = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5373,12 +5434,14 @@ local _, _, setFarmLevel = createToggleRow(farmPage, "🔥 Auto Farm Level (Sea 
         updateStatusUI("Đã tạm dừng Auto Farm Level", Theme.Yellow)
     end
     updateQuickFarmLevel(v)
-end)
+end))
 syncToggles.FarmLevel = setFarmLevel
 
-createToggleRow(farmPage, "🛡️ Auto Buso Haki (Tự Bật Khi Farm)", Config.AutoBuso, 3, function(v)
+local setBuso = select(3, createToggleRow(farmPage, "🛡️ Auto Buso Haki (Tự Bật Khi Farm)", Config.AutoBuso, 3, function(v)
     Config.AutoBuso = v
-end)
+    if syncToggles.SettingsBuso then syncToggles.SettingsBuso(v) end
+end))
+syncToggles.Buso = setBuso
 
 local Weapons = { "Melee", "Sword", "Blox Fruit" }
 local WpIdx = 1
@@ -5476,7 +5539,7 @@ SP10.MouseButton1Click:Connect(function() adjSpeed(10) end)
 
 createSectionHeader(farmPage, "🧪 FARM NGUYÊN LIỆU (MATERIALS)", 7)
 
-local _, _, setMaterial = createToggleRow(farmPage, "🧪 Auto Farm Nguyên Liệu Đang Chọn", Config.AutoMaterial, 8, function(v)
+local setMaterial = select(3, createToggleRow(farmPage, "🧪 Auto Farm Nguyên Liệu Đang Chọn", Config.AutoMaterial, 8, function(v)
     Config.AutoMaterial = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5494,7 +5557,7 @@ local _, _, setMaterial = createToggleRow(farmPage, "🧪 Auto Farm Nguyên Li�
         updateStatusUI("Đã tạm dừng Farm nguyên liệu", Theme.Yellow)
     end
     updateQuickMaterial(v)
-end)
+end))
 syncToggles.Material = setMaterial
 
 local MatNames = {
@@ -5574,7 +5637,7 @@ MatNext.MouseButton1Click:Connect(function() stepMat(1) end)
 
 createSectionHeader(farmPage, "🍰 ĐẢO BÁNH & KATA", 10)
 
-local _, _, setKata = createToggleRow(farmPage, "🍰 Auto Farm Cake Queen / Kata (Quái & Boss)", Config.AutoFarmKata, 11, function(v)
+local setKata = select(3, createToggleRow(farmPage, "🍰 Auto Farm Cake Queen / Kata (Quái & Boss)", Config.AutoFarmKata, 11, function(v)
     Config.AutoFarmKata = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5592,7 +5655,7 @@ local _, _, setKata = createToggleRow(farmPage, "🍰 Auto Farm Cake Queen / Kat
         updateStatusUI("Đã tạm dừng Auto Farm Kata", Theme.Yellow)
     end
     updateQuickKata(v)
-end)
+end))
 syncToggles.Kata = setKata
 
 createToggleRow(farmPage, "🔔 Tự Động Triệu Hồi Kata (Mở Cổng Khi Đủ 500 Quái)", Config.AutoSummonKata, 12, function(v)
@@ -5607,13 +5670,18 @@ end)
 
 createSectionHeader(farmPage, "🦴 FARM XƯƠNG (BONES)", 13)
 
-createToggleRow(farmPage, "🦴 Auto Đổi Xương Ngẫu Nhiên (Random Bones)", Config.AutoRandomBones, 14, function(v)
+local setRandomBones = select(3, createToggleRow(farmPage, "🦴 Auto Đổi Xương Ngẫu Nhiên (Random Bones)", Config.AutoRandomBones, 14, function(v)
     Config.AutoRandomBones = v
-end)
+    if syncToggles.SettingsRandomBones then syncToggles.SettingsRandomBones(v) end
+end))
+syncToggles.RandomBones = setRandomBones
+
+end
 
 -- =========================================================================
 -- TAB 3: GACHA (Gacha Trái, Xương Death King, Moon Phase Event)
 -- =========================================================================
+do
 local gachaPage = pages["Gacha"]
 
 createSectionHeader(gachaPage, "🎲 GACHA TRÁI ÁC QUỶ", 1)
@@ -5715,14 +5783,17 @@ HopMoonBtn.MouseButton1Click:Connect(function()
     hopToServer("Normal", "Tìm Server Gần Full Moon (" .. moon.ShortName .. ")")
 end)
 
+end
+
 -- =========================================================================
 -- TAB 4: STORE (Chu trình Godhuman, Mua Võ, Kỹ Năng, Haki, Gear V4)
 -- =========================================================================
+do
 local storePage = pages["Store"]
 
 createSectionHeader(storePage, "👑 CHU TRÌNH GODHUMAN (AUTO 9 VÕ + MASTERY + NL)", 1)
 
-local _, _, setGodhuman = createToggleRow(storePage, "👑 Auto Get Godhuman (Full 9 Võ + 400 Mas + NL)", Config.AutoGodhuman, 2, function(v)
+local setGodhuman = select(3, createToggleRow(storePage, "👑 Auto Get Godhuman (Full 9 Võ + 400 Mas + NL)", Config.AutoGodhuman, 2, function(v)
     Config.AutoGodhuman = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5738,7 +5809,8 @@ local _, _, setGodhuman = createToggleRow(storePage, "👑 Auto Get Godhuman (Fu
         updateStatusUI("Đã tạm dừng Auto Godhuman", Theme.Yellow)
     end
     updateQuickGodhuman(v)
-end)
+    if syncToggles.SettingsGodhuman then syncToggles.SettingsGodhuman(v) end
+end))
 syncToggles.Godhuman = setGodhuman
 
 createSectionHeader(storePage, "🥊 MUA CÁC MÔN VÕ (FIGHTING STYLES)", 3)
@@ -5782,7 +5854,7 @@ end)
 
 createSectionHeader(storePage, "🌳 GEAR TỘC V4 (TEMPLE OF TIME)", 14)
 
-createToggleRow(storePage, "⚙️ Auto Bay Mua Gear V4 (NPC Ancient One)", Config.AutoFlyBuyGear, 15, function(v)
+local setFlyBuyGear = select(3, createToggleRow(storePage, "⚙️ Auto Bay Mua Gear V4 (NPC Ancient One)", Config.AutoFlyBuyGear, 15, function(v)
     Config.AutoFlyBuyGear = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5799,11 +5871,16 @@ createToggleRow(storePage, "⚙️ Auto Bay Mua Gear V4 (NPC Ancient One)", Conf
         removeAntiFall()
         updateStatusUI("Đã dừng Auto Bay Mua Gear", Theme.Yellow)
     end
-end)
+    if syncToggles.SettingsFlyBuyGear then syncToggles.SettingsFlyBuyGear(v) end
+end))
+syncToggles.FlyBuyGear = setFlyBuyGear
+
+end
 
 -- =========================================================================
 -- TAB 5: TELEPORTS (Chuyển Sea, Hop Server, Hop Ít Người)
 -- =========================================================================
+do
 local tpPage = pages["Teleports"]
 
 createSectionHeader(tpPage, "🚢 CHUYỂN SEA", 1)
@@ -5853,9 +5930,12 @@ createToggleRow(tpPage, "🔄 Tự Hop Server Khi Trống Bãi / Hết Boss Key"
     Config.AutoHopWhenEmpty = v
 end)
 
+end
+
 -- =========================================================================
 -- TAB 6: MISC (Tộc V3, V4, Leviathan, Spoof Thuyền, No Stun)
 -- =========================================================================
+do
 local miscPage = pages["Misc"]
 
 createSectionHeader(miscPage, "🧬 TỘC V3 & TỘC V4", 1)
@@ -5913,7 +5993,7 @@ end)
 
 createSectionHeader(miscPage, "🐉 LEVIATHAN & BIỂN SÂU", 6)
 
-local _, _, setLeviathan = createToggleRow(miscPage, "🐉 Auto Tìm Đảo Leviathan (Hối Lộ Spy + Ra Tầng 6)", Config.AutoFindLeviathan, 7, function(v)
+local setLeviathan = select(3, createToggleRow(miscPage, "🐉 Auto Tìm Đảo Leviathan (Hối Lộ Spy + Ra Tầng 6)", Config.AutoFindLeviathan, 7, function(v)
     Config.AutoFindLeviathan = v
     State.LastMobSeenClock = os.clock()
     if v then
@@ -5929,7 +6009,7 @@ local _, _, setLeviathan = createToggleRow(miscPage, "🐉 Auto Tìm Đảo Levi
         updateStatusUI("Đã tạm dừng Auto Tìm Đảo Leviathan", Theme.Yellow)
     end
     updateQuickLeviathan(v)
-end)
+end))
 syncToggles.Leviathan = setLeviathan
 
 createToggleRow(miscPage, "⚔️ Auto Đánh Leviathan (Chia Đủ >=15% Dame Mỗi Đuôi)", Config.AutoAttackLeviathan, 8, function(v)
@@ -5966,17 +6046,21 @@ createToggleRow(miscPage, "🚫 No Stun (Chống Choáng / Xóa BodyGyro / BodyP
     Config.NoStun = v
 end)
 
+end
+
 -- =========================================================================
--- TAB 7: SETTINGS (Cấu hình Farm, Gacha, Store, Server, Lưu Config)
+-- TAB 7: SETTINGS (Cấu hình riêng cho Farm, Gacha, Store, Server, Lưu Config)
 -- =========================================================================
+do
 local settingsPage = pages["Settings"]
 
-createSectionHeader(settingsPage, "🌾 CẤU HÌNH COMBAT & FARM", 1)
+-- Bảng Cấu Hình Farm
+createSectionHeader(settingsPage, "🌾 CẤU HÌNH FARM", 1)
 
-local _, _, setFastAttack = createToggleRow(settingsPage, "⚡ Fast Attack Đa Nhịp (Đánh Nhanh & Chống Kẹt)", Config.FastAttack, 2, function(v)
+local setFastAttack = select(3, createToggleRow(settingsPage, "⚡ Fast Attack Đa Nhịp (Đánh Nhanh & Chống Kẹt)", Config.FastAttack, 2, function(v)
     Config.FastAttack = v
     updateQuickFastAttack(v)
-end)
+end))
 syncToggles.FastAttack = setFastAttack
 
 local FaModeOrder = { "SuperFast", "HyperBurst", "SafeHuman" }
@@ -6013,20 +6097,82 @@ createToggleRow(settingsPage, "🧲 Bring Mob (Gom Quái & Khóa Mỏ Neo Phẳn
     Config.BringMob = v
 end)
 
-createSectionHeader(settingsPage, "🌐 CẤU HÌNH SERVER & HOP", 5)
+local setSettingsBuso = select(3, createToggleRow(settingsPage, "🛡️ Tự Động Bật Buso Haki (Haki Vũ Trang)", Config.AutoBuso, 5, function(v)
+    Config.AutoBuso = v
+    if syncToggles.Buso then syncToggles.Buso(v) end
+end))
+syncToggles.SettingsBuso = setSettingsBuso
 
-createToggleRow(settingsPage, "🌐 Tự Động Hop Khi Trống Bãi Quái", Config.AutoHopWhenEmpty, 6, function(v)
+-- Bảng Cấu Hình Gacha
+createSectionHeader(settingsPage, "🎲 CẤU HÌNH GACHA", 6)
+
+local setSettingsRandomBones = select(3, createToggleRow(settingsPage, "🦴 Auto Random Bones (Tự Động Gacha Xương Death King)", Config.AutoRandomBones, 7, function(v)
+    Config.AutoRandomBones = v
+    if syncToggles.RandomBones then syncToggles.RandomBones(v) end
+end))
+syncToggles.SettingsRandomBones = setSettingsRandomBones
+
+createToggleRow(settingsPage, "🌕 Tự Động Hop Server Gần Trăng Tròn (Full Moon)", Config.AutoHopNearFullMoon, 8, function(v)
+    Config.AutoHopNearFullMoon = v
+end)
+
+-- Bảng Cấu Hình Store
+createSectionHeader(settingsPage, "🛒 CẤU HÌNH STORE", 9)
+
+local setSettingsGodhuman = select(3, createToggleRow(settingsPage, "👑 Auto Godhuman (Tự Động Chu Trình Học Võ)", Config.AutoGodhuman, 10, function(v)
+    Config.AutoGodhuman = v
+    State.LastMobSeenClock = os.clock()
+    if v then
+        State.ActiveMainMode = "Godhuman"
+        Config.ActiveMainMode = "Godhuman"
+        State.IsHopping = false
+        State.LockedMob = nil
+        State.PosMon = nil
+        updateStatusUI("Chu trình Auto Godhuman...", Theme.Yellow)
+    elseif not isAnyAutomationActive() then
+        stopTween()
+        removeAntiFall()
+        updateStatusUI("Đã dừng Auto Godhuman", Theme.Yellow)
+    end
+    updateQuickGodhuman(v)
+    if syncToggles.Godhuman then syncToggles.Godhuman(v) end
+end))
+syncToggles.SettingsGodhuman = setSettingsGodhuman
+
+local setSettingsFlyBuyGear = select(3, createToggleRow(settingsPage, "⚙️ Auto Fly Buy Gear V4 (Tự Bay Mua Bánh Răng)", Config.AutoFlyBuyGear, 11, function(v)
+    Config.AutoFlyBuyGear = v
+    State.LastMobSeenClock = os.clock()
+    if v then
+        State.ActiveMainMode = "BuyGear"
+        Config.ActiveMainMode = "BuyGear"
+        State.IsHopping = false
+        State.IsHoveringV4Sky = false
+        State.VisitedAncientOneNpc = false
+        State.LockedMob = nil
+        State.PosMon = nil
+        updateStatusUI("Bay lên NPC Đảo Great Tree -> Vào Temple Mua Gear...", Theme.Green)
+    elseif not isAnyAutomationActive() then
+        stopTween()
+        removeAntiFall()
+        updateStatusUI("Đã dừng Auto Bay Mua Gear", Theme.Yellow)
+    end
+    if syncToggles.FlyBuyGear then syncToggles.FlyBuyGear(v) end
+end))
+syncToggles.SettingsFlyBuyGear = setSettingsFlyBuyGear
+
+-- Bảng Cấu Hình Hệ Thống & Lưu Trữ
+createSectionHeader(settingsPage, "💾 CẤU HÌNH HỆ THỐNG & LƯU TRỮ", 12)
+
+createToggleRow(settingsPage, "🌐 Tự Động Hop Khi Trống Bãi Quái", Config.AutoHopWhenEmpty, 13, function(v)
     Config.AutoHopWhenEmpty = v
 end)
 
-createSectionHeader(settingsPage, "💾 CẤU HÌNH LƯU TRỮ & HỆ THỐNG", 7)
-
-createToggleRow(settingsPage, "💾 Auto Lưu Config (Tự Động Lưu Mọi Cài Đặt)", Config.AutoSaveConfig, 8, function(v)
+createToggleRow(settingsPage, "💾 Auto Lưu Config (Tự Động Lưu Mọi Cài Đặt)", Config.AutoSaveConfig, 14, function(v)
     Config.AutoSaveConfig = v
     if v then saveConfig() end
 end)
 
-createActionRow(settingsPage, "💾 Lưu Cấu Hình Ngay Lập Tức", "Lưu Ngay", Color3.fromRGB(50, 110, 80), 9, function()
+createActionRow(settingsPage, "💾 Lưu Cấu Hình Ngay Lập Tức", "Lưu Ngay", Color3.fromRGB(50, 110, 80), 15, function()
     local ok = saveConfig()
     if ok then
         updateStatusUI("Đã lưu cấu hình vào " .. ConfigFileName, Theme.Green)
@@ -6038,7 +6184,7 @@ end)
 local KeyInfoBox = Instance.new("TextLabel")
 KeyInfoBox.Size = UDim2.new(1, 0, 0, 36)
 KeyInfoBox.BackgroundColor3 = Theme.CardDark
-KeyInfoBox.LayoutOrder = 10
+KeyInfoBox.LayoutOrder = 16
 KeyInfoBox.Text = "⌨️ Phím Đóng/Mở GUI: RightControl (PC)  |  Chạm nút tròn 🌸 (Mobile)"
 KeyInfoBox.TextColor3 = Theme.Dim
 KeyInfoBox.Font = Enum.Font.GothamMedium
@@ -6046,9 +6192,12 @@ KeyInfoBox.TextSize = 10
 KeyInfoBox.Parent = settingsPage
 addCorner(KeyInfoBox, 8)
 
+end
+
 -- =========================================================================
 -- TAB 8: ABOUT (Logo Hub, Thông tin Hub, Bản quyền)
 -- =========================================================================
+do
 local aboutPage = pages["About"]
 
 local AboutCard = Instance.new("Frame")
@@ -6105,6 +6254,8 @@ AboutDesc.Font = Enum.Font.GothamMedium
 AboutDesc.TextSize = 10
 AboutDesc.TextXAlignment = Enum.TextXAlignment.Left
 AboutDesc.TextYAlignment = Enum.TextYAlignment.Top
+
+end
 
 -- =========================================================================
 -- FLOATING TOGGLE BUTTON (Tối ưu cho cả PC và Mobile Delta X)
@@ -6177,7 +6328,6 @@ makeDraggable(TopBar, MainFrame, false)
 makeDraggable(FloatBtn, FloatBtn, true)
 
 MinBtn.MouseButton1Click:Connect(toggleUI)
-FloatBtn.MouseButton1Click:Connect(toggleUI)
 
 table.insert(State.Connections, UserInputService.InputBegan:Connect(function(input, gp)
     if not gp and input.KeyCode == Config.ToggleKey then
@@ -6191,7 +6341,7 @@ task.spawn(function()
     if updateDashboardUI then Util.safeCall("updateDashboardUI", updateDashboardUI) end
 end)
 
-end
+end)()
 
 
 local function cleanupMaidHub()
